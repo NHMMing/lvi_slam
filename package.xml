@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>lvi_slam</name>
+  <version>0.1.0</version>
+  <description>
+    紧耦合 LiDAR-Visual-Inertial SLAM。前端 iEKF（局部精度）+ 后端因子图（全局一致性）。
+    针对 Livox 非重复扫描雷达优化。
+  </description>
+  <maintainer email="you@example.com">LVI-SLAM contributors</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_eigen</depend>
+  <depend>cv_bridge</depend>
+  <depend>pcl_conversions</depend>
+  <depend>livox_ros_driver2</depend>
+
+  <depend>eigen</depend>
+  <depend>libpcl-all-dev</depend>
+  <depend>yaml-cpp</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
