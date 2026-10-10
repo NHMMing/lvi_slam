@@ -55,7 +55,7 @@ void printUsage() {
   --duration <sec>      只跑 N 秒
 
 常用数据集示例:
-  # MARS-LVIG (Livox Avia, 需先 rosbags-convert 成 ROS2)
+  # MARS-LVIG (Livox Avia；ROS1 构建直接传 .bag，ROS2 构建需先 rosbags-convert)
   lvi_offline --config config/livox_mid360.yaml --data HKisland01_ros2 \
       --profile livox --imu-topic /livox/imu --lidar-topic /livox/lidar \
       --image-topic /left_camera/image

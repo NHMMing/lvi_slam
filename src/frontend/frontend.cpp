@@ -4,10 +4,28 @@
 
 namespace lvi {
 
+namespace {
+// 相机内参在 YAML 里挂在 visual 下，CameraModel 只需要其中的内参部分
+CameraConfig toCameraConfig(const VisualConfig& v) {
+  CameraConfig c;
+  c.width = v.width;
+  c.height = v.height;
+  c.fx = v.fx;
+  c.fy = v.fy;
+  c.cx = v.cx;
+  c.cy = v.cy;
+  c.d0 = v.k1;
+  c.d1 = v.k2;
+  c.d2 = v.p1;
+  c.d3 = v.p2;
+  return c;
+}
+}  // namespace
+
 Frontend::Frontend(const Config& cfg) : cfg_(cfg) {
   imu_  = std::make_unique<ImuProcessor>(cfg);
   map_  = std::make_unique<VoxelMap>(cfg);
-  cam_  = std::make_unique<CameraModel>(cfg.visual);
+  cam_  = std::make_unique<CameraModel>(toCameraConfig(cfg.visual));
 
   IEKF::Options opt;
   opt.max_iterations = cfg.max_iterations;
@@ -18,8 +36,8 @@ Frontend::Frontend(const Config& cfg) : cfg_(cfg) {
     vio_ = std::make_unique<HybridVisualUpdater>(cfg, map_.get(), cam_.get());
   }
 
-  cloud_undistort_ = std::make_shared<PointCloud>();
-  cloud_down_      = std::make_shared<PointCloud>();
+  cloud_undistort_.reset(new PointCloud());
+  cloud_down_.reset(new PointCloud());
 
   state_.ext_rot_ci = cfg.extrinsic.ext_rot_ci;
   state_.ext_pos_ci = cfg.extrinsic.ext_pos_ci;
@@ -37,6 +55,11 @@ Frontend::Frontend(const Config& cfg) : cfg_(cfg) {
 }
 
 Frontend::~Frontend() = default;
+
+// IMU 对齐完成且首帧点云已建图之后，状态才有意义，才对外发布位姿
+bool Frontend::initialized() const {
+  return imu_->initialized() && map_initialized_;
+}
 
 bool Frontend::process(const SyncPackage& pkg) {
   if (system_start_time_ < 0) system_start_time_ = pkg.sync_time;
@@ -151,7 +174,7 @@ void Frontend::createKeyframe(const SyncPackage& pkg) {
   kf->pose_cov = state_.cov.block<6, 6>(0, 0);
 
   // 存稠密点云（不是降采样后的），回环 ICP 和最终建图需要
-  kf->cloud_body = std::make_shared<PointCloud>(*cloud_undistort_);
+  kf->cloud_body.reset(new PointCloud(*cloud_undistort_));
 
   if (vio_) kf->descriptors = vio_->loopDescriptors();
 

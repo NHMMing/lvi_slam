@@ -67,6 +67,31 @@ class DataSource {
 };
 
 // ---------------------------------------------------------------------------
+// ROS1 bag（.bag）
+//
+// rosbag::View 跨话题按时间归并，同样不需要额外排序。
+// 仅在 ROS1 (catkin) 构建下带真实实现，其余构建里是报错桩。
+// ---------------------------------------------------------------------------
+class Rosbag1Source : public DataSource {
+ public:
+  Rosbag1Source(const std::string& path, const Config& cfg,
+                const TopicMap& topics, const CloudProfile& profile);
+  ~Rosbag1Source() override;
+
+  bool next(SourceMessage* msg) override;
+  double startTime() const override { return start_time_; }
+  double endTime()   const override { return end_time_; }
+  size_t totalCount() const override { return total_count_; }
+  const char* name() const override { return "rosbag1"; }
+
+ private:
+  struct Impl;                 // pimpl：把 rosbag 的头文件挡在核心库之外
+  std::unique_ptr<Impl> impl_;
+  double start_time_ = 0, end_time_ = 0;
+  size_t total_count_ = 0;
+};
+
+// ---------------------------------------------------------------------------
 // ROS2 bag（.db3 / .mcap / 目录）
 //
 // rosbag2_cpp 的 SequentialReader 本身就是按时间顺序返回的，

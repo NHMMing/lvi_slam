@@ -1,6 +1,6 @@
 # LVI-SLAM
 
-紧耦合 LiDAR-Visual-Inertial SLAM。**前端 iEKF + 后端因子图**混合架构，针对 Livox 非重复扫描雷达优化。ROS2 (Humble/Jazzy)。
+紧耦合 LiDAR-Visual-Inertial SLAM。**前端 iEKF + 后端因子图**混合架构，针对 Livox 非重复扫描雷达优化。同时支持 ROS1 (Noetic) 和 ROS2 (Humble/Jazzy)。
 
 ## 为什么再造一个轮子
 
@@ -77,12 +77,40 @@ include/lvi_slam/
 
 ## 编译
 
-```bash
-# 依赖
-sudo apt install ros-humble-desktop libpcl-dev libeigen3-dev libopencv-dev libyaml-cpp-dev
-# GTSAM 4.2+ 建议源码编译，开 GTSAM_USE_SYSTEM_EIGEN=ON
-# livox_ros_driver2 需要先装到同一 workspace
+同一份源码支持 ROS1 和 ROS2，由环境变量 `ROS_VERSION`（source 对应的 setup 后自动设置）决定；
+也可用 `-DLVI_ROS_VERSION=1|2|0` 强制指定（0 = 无 ROS，只编核心库和离线工具）。
 
+核心算法（`src/`、`include/`）完全不依赖 ROS，两个版本只在下面三处不同：
+
+| | ROS1 (Noetic) | ROS2 (Humble+) |
+|---|---|---|
+| 节点 | `ros1/lvi_slam_node.cpp` | `ros2/lvi_slam_node.cpp` |
+| bag 读取 | `src/io/rosbag1_source.cpp`（`.bag`） | `src/io/ros2bag_source.cpp`（`.db3`/`.mcap`） |
+| launch | `launch/lvi_slam.launch` | `launch/lvi_slam.launch.py` |
+
+```bash
+# 公共依赖
+sudo apt install libpcl-dev libeigen3-dev libopencv-dev libyaml-cpp-dev
+# GTSAM 4.2 源码编译（Ubuntu 20.04 没有 apt 包）。Eigen 和 -march=native 必须与本工程一致，
+# CMake 配置阶段会检查，不一致直接报错：
+#   cmake .. -DCMAKE_BUILD_TYPE=Release -DGTSAM_USE_SYSTEM_EIGEN=ON \
+#     -DEIGEN3_INCLUDE_DIR=/usr/include/eigen3 -DGTSAM_BUILD_WITH_MARCH_NATIVE=ON \
+#     -DCMAKE_INSTALL_PREFIX=~/library/gtsam/install -DCMAKE_INSTALL_RPATH='$ORIGIN'
+# 装到非系统目录、不跑 ldconfig 时，CMAKE_INSTALL_RPATH='$ORIGIN' 让 libgtsam 找到同目录的
+# libmetis-gtsam.so；本工程编译时加 -DGTSAM_DIR=~/library/gtsam/install/lib/cmake/GTSAM
+# 依赖版本由 LVI_{EIGEN,PCL,OPENCV,YAML_CPP,GTSAM}_VERSION 锁定，默认是 Noetic 的 apt 版本
+# （Eigen 3.3.7 / PCL 1.10 / OpenCV 4.2 / yaml-cpp 0.6.2 / GTSAM 4.2）。配置前先 conda deactivate。
+
+# ---- ROS1 Noetic (Ubuntu 20.04) ----
+sudo apt install ros-noetic-desktop
+# 需要 livox_ros_driver 放进同一 catkin workspace。
+# 用 Mid-360 驱动时加 -DLVI_LIVOX_DRIVER=livox_ros_driver2
+cd ~/catkin_ws && catkin_make -DCMAKE_BUILD_TYPE=Release
+# 若 GTSAM 装在非标准前缀：-DCMAKE_PREFIX_PATH=/path/to/gtsam
+
+# ---- ROS2 Humble (Ubuntu 22.04) ----
+sudo apt install ros-humble-desktop
+# livox_ros_driver2 需要先装到同一 workspace
 cd ~/ros2_ws && colcon build --packages-select lvi_slam \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
@@ -92,7 +120,8 @@ cd ~/ros2_ws && colcon build --packages-select lvi_slam \
 ## 运行
 
 ```bash
-ros2 launch lvi_slam lvi_slam.launch.py
+roslaunch lvi_slam lvi_slam.launch          # ROS1
+ros2 launch lvi_slam lvi_slam.launch.py     # ROS2
 ```
 
 **第一次跑务必按这个顺序**：
@@ -119,6 +148,7 @@ ros2 launch lvi_slam lvi_slam.launch.py
 | 后端因子图（ISAM2 + 里程计/GPS/回环因子） | ✅ |
 | 回环检测（Scan Context + ICP + 视觉双模态） | ✅ |
 | ROS2 节点 + launch + 配置 | ✅ |
+| ROS1 节点 + launch + bag 读取 | ✅（节点与 launch 待实机验证） |
 | 离线数据加载器 | 🚧 骨架（优先级最高） |
 | 外参在线标定解锁逻辑 | 🚧 接口已留 |
 | RViz 配置文件 | 🚧 |

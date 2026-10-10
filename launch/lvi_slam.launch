@@ -1,0 +1,12 @@
+<!-- ROS1 launch。ROS2 请用 lvi_slam.launch.py。 -->
+<launch>
+  <arg name="config_file" default="$(find lvi_slam)/config/livox_mid360.yaml"/>
+  <arg name="rviz" default="false"/>
+
+  <node pkg="lvi_slam" type="lvi_slam_node" name="lvi_slam" output="screen">
+    <param name="config_file" value="$(arg config_file)"/>
+  </node>
+
+  <!-- 仓库里还没有 lvi_slam.rviz（见 docs/README.md 实现状态），先用空配置启动 -->
+  <node if="$(arg rviz)" pkg="rviz" type="rviz" name="rviz"/>
+</launch>

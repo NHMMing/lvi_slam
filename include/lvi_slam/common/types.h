@@ -3,6 +3,13 @@
 #pragma once
 
 #include <Eigen/Dense>
+
+// 与 CMake 配置期选定的 Eigen 版本对照，防止 include 路径顺序把另一份 Eigen 带进来
+#ifdef LVI_EXPECTED_EIGEN_VERSION
+static_assert(EIGEN_WORLD_VERSION * 10000 + EIGEN_MAJOR_VERSION * 100 + EIGEN_MINOR_VERSION ==
+                  LVI_EXPECTED_EIGEN_VERSION,
+              "Eigen header version differs from the one selected by CMake");
+#endif
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <opencv2/core.hpp>

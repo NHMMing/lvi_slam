@@ -25,6 +25,13 @@
 **为什么它对本项目最重要**：唯一的 Livox + 下视视角公开数据集，`CustomMsg` 格式和 Mid-360 完全一致，改个话题名就能跑。
 
 ```bash
+# ROS1 (Noetic) 构建：直接读 .bag，不需要转换
+lvi_offline --config config/mars_lvig.yaml \
+  --data HKisland01.bag --profile livox \
+  --imu-topic /livox/imu --lidar-topic /livox/lidar \
+  --image-topic /left_camera/image --out mars_hk01.tum
+
+# ROS2 构建：先把 .bag 转成 ROS2 格式（或直接下载 ROS2 版）
 pip install rosbags
 rosbags-convert --src HKisland01.bag --dst HKisland01_ros2
 

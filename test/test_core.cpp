@@ -10,7 +10,9 @@
 using namespace lvi;
 
 TEST(So3, ExpLogRoundTrip) {
-  for (double a = -3.0; a < 3.0; a += 0.37) {
+  // Log 只在 |phi| < pi 内是 Exp 的逆（超出后返回差 2pi 的等价主值），
+  // |phi| = 1.158|a|，所以 a 限制在 ±2.6 以内（|phi| <= 3.01）
+  for (double a = -2.6; a <= 2.6; a += 0.37) {
     const V3D phi(a, 0.5 * a, -0.3 * a);
     EXPECT_NEAR((so3::Log(so3::Exp(phi)) - phi).norm(), 0.0, 1e-9);
   }

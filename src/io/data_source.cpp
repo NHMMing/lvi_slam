@@ -33,18 +33,9 @@ std::unique_ptr<DataSource> DataSource::create(const std::string& path,
     return std::make_unique<Ros2BagSource>(path, cfg, topics, profile);
   }
   if (ext == ".bag") {
-    // ROS1 bag。MARS-LVIG / Hilti / NTU VIRAL 都是这个格式。
-    //
-    // 不直接读 ROS1 bag 的原因：rosbag_storage 依赖整套 ROS1 运行时，
-    // 在纯 ROS2 环境里装它非常痛苦，而且会污染依赖树。
-    // 官方推荐路径是先转换，一条命令的事：
-    std::cerr << "[DataSource] 检测到 ROS1 bag。请先转成 ROS2 格式：\n"
-              << "  pip install rosbags\n"
-              << "  rosbags-convert --src " << path << " --dst " << path << "_ros2\n"
-              << "转换后把 --dst 目录传给本工具。\n"
-              << "注意：Livox CustomMsg 需要 rosbags 识别自定义类型，\n"
-              << "      加 --src-typestore ros1_noetic 并提供 msg 定义。\n";
-    return nullptr;
+    // ROS1 bag。MARS-LVIG / R3LIVE / Hilti / NTU VIRAL 都是这个格式。
+    // ROS1 (catkin) 构建下直接读；其他构建里 Rosbag1Source 是报错桩。
+    return std::make_unique<Rosbag1Source>(path, cfg, topics, profile);
   }
 
   std::cerr << "[DataSource] 无法识别的格式: " << ext << "\n";

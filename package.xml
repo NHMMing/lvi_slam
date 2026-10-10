@@ -10,9 +10,14 @@
   <maintainer email="you@example.com">LVI-SLAM contributors</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>ament_cmake</buildtool_depend>
+  <!-- 同一个 package.xml 同时服务 ROS1 (catkin) 和 ROS2 (ament)，靠 ROS_VERSION 条件区分 -->
+  <buildtool_depend condition="$ROS_VERSION == 1">catkin</buildtool_depend>
+  <buildtool_depend condition="$ROS_VERSION == 2">ament_cmake</buildtool_depend>
 
-  <depend>rclcpp</depend>
+  <depend condition="$ROS_VERSION == 1">roscpp</depend>
+  <depend condition="$ROS_VERSION == 1">rosbag</depend>
+  <depend condition="$ROS_VERSION == 2">rclcpp</depend>
+
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
@@ -22,15 +27,19 @@
   <depend>tf2_eigen</depend>
   <depend>cv_bridge</depend>
   <depend>pcl_conversions</depend>
-  <depend>livox_ros_driver2</depend>
+  <!-- ROS1 默认 livox_ros_driver（Avia/Horizon、多数数据集）；
+       用 Mid-360 驱动时 cmake 加 -DLVI_LIVOX_DRIVER=livox_ros_driver2 并改这一行 -->
+  <depend condition="$ROS_VERSION == 1">livox_ros_driver</depend>
+  <depend condition="$ROS_VERSION == 2">livox_ros_driver2</depend>
 
   <depend>eigen</depend>
   <depend>libpcl-all-dev</depend>
   <depend>yaml-cpp</depend>
 
-  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend condition="$ROS_VERSION == 2">ament_cmake_gtest</test_depend>
 
   <export>
-    <build_type>ament_cmake</build_type>
+    <build_type condition="$ROS_VERSION == 1">catkin</build_type>
+    <build_type condition="$ROS_VERSION == 2">ament_cmake</build_type>
   </export>
 </package>
