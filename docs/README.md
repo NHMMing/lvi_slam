@@ -103,10 +103,15 @@ sudo apt install libpcl-dev libeigen3-dev libopencv-dev libyaml-cpp-dev
 
 # ---- ROS1 Noetic (Ubuntu 20.04) ----
 sudo apt install ros-noetic-desktop
-# 需要 livox_ros_driver 放进同一 catkin workspace。
-# 用 Mid-360 驱动时加 -DLVI_LIVOX_DRIVER=livox_ros_driver2
-cd ~/catkin_ws && catkin_make -DCMAKE_BUILD_TYPE=Release
-# 若 GTSAM 装在非标准前缀：-DCMAKE_PREFIX_PATH=/path/to/gtsam
+# 需要 livox_ros_driver 放进同一 catkin workspace。回放 bag 用仓库自带的
+# third_party/livox_ros_driver 即可（只有消息定义，不需要 Livox-SDK）；
+# catkin 不会进入 lvi_slam 包内部查找，所以要单独软链接到 src/。
+# 接真实雷达时换成官方完整驱动；用 Mid-360 驱动时加 -DLVI_LIVOX_DRIVER=livox_ros_driver2
+mkdir -p ~/lvi_ws/src && cd ~/lvi_ws/src
+ln -s /path/to/lvi_slam lvi_slam
+ln -s /path/to/lvi_slam/third_party/livox_ros_driver livox_ros_driver
+cd ~/lvi_ws && catkin_make -DCMAKE_BUILD_TYPE=Release
+# 若 GTSAM 装在非标准前缀：-DGTSAM_DIR=/path/to/gtsam/install/lib/cmake/GTSAM
 
 # ---- ROS2 Humble (Ubuntu 22.04) ----
 sudo apt install ros-humble-desktop
