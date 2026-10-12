@@ -7,7 +7,7 @@
     紧耦合 LiDAR-Visual-Inertial SLAM。前端 iEKF（局部精度）+ 后端因子图（全局一致性）。
     针对 Livox 非重复扫描雷达优化。
   </description>
-  <maintainer email="you@example.com">LVI-SLAM contributors</maintainer>
+  <maintainer email="118342605+NHMMing@users.noreply.github.com">MMing</maintainer>
   <license>MIT</license>
 
   <!-- 同一个 package.xml 同时服务 ROS1 (catkin) 和 ROS2 (ament)，靠 ROS_VERSION 条件区分 -->

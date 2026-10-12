@@ -3,7 +3,7 @@
   <name>livox_ros_driver</name>
   <version>2.6.0</version>
   <description>Livox CustomMsg message definitions only (no SDK, no driver node)</description>
-  <maintainer email="you@example.com">you</maintainer>
+  <maintainer email="118342605+NHMMing@users.noreply.github.com">MMing</maintainer>
   <license>MIT</license>
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>message_generation</build_depend>
