@@ -92,12 +92,14 @@ include/lvi_slam/
 # 公共依赖
 sudo apt install libpcl-dev libeigen3-dev libopencv-dev libyaml-cpp-dev
 # GTSAM 4.2 源码编译（Ubuntu 20.04 没有 apt 包）。Eigen 和 -march=native 必须与本工程一致，
-# CMake 配置阶段会检查，不一致直接报错：
+# CMake 配置阶段会检查，不一致直接报错。本工程默认不开 -march=native（见 CMakeLists.txt），
+# 所以 GTSAM 也要关掉；Eigen 显式指到系统的 3.3.7，否则可能误用 /usr/local 下的其他版本：
 #   cmake .. -DCMAKE_BUILD_TYPE=Release -DGTSAM_USE_SYSTEM_EIGEN=ON \
-#     -DEIGEN3_INCLUDE_DIR=/usr/include/eigen3 -DGTSAM_BUILD_WITH_MARCH_NATIVE=ON \
-#     -DCMAKE_INSTALL_PREFIX=~/library/gtsam/install -DCMAKE_INSTALL_RPATH='$ORIGIN'
+#     -DEIGEN3_INCLUDE_DIR=/usr/include/eigen3 -DEigen3_DIR=/usr/lib/cmake/eigen3 \
+#     -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF -DGTSAM_BUILD_TESTS=OFF -DGTSAM_BUILD_UNSTABLE=OFF \
+#     -DCMAKE_INSTALL_PREFIX=~/library/gtsam/install_nonative -DCMAKE_INSTALL_RPATH='$ORIGIN'
 # 装到非系统目录、不跑 ldconfig 时，CMAKE_INSTALL_RPATH='$ORIGIN' 让 libgtsam 找到同目录的
-# libmetis-gtsam.so；本工程编译时加 -DGTSAM_DIR=~/library/gtsam/install/lib/cmake/GTSAM
+# libmetis-gtsam.so。
 # 依赖版本由 LVI_{EIGEN,PCL,OPENCV,YAML_CPP,GTSAM}_VERSION 锁定，默认是 Noetic 的 apt 版本
 # （Eigen 3.3.7 / PCL 1.10 / OpenCV 4.2 / yaml-cpp 0.6.2 / GTSAM 4.2）。配置前先 conda deactivate。
 
@@ -107,11 +109,12 @@ sudo apt install ros-noetic-desktop
 # third_party/livox_ros_driver 即可（只有消息定义，不需要 Livox-SDK）；
 # catkin 不会进入 lvi_slam 包内部查找，所以要单独软链接到 src/。
 # 接真实雷达时换成官方完整驱动；用 Mid-360 驱动时加 -DLVI_LIVOX_DRIVER=livox_ros_driver2
-mkdir -p ~/lvi_ws/src && cd ~/lvi_ws/src
-ln -s /path/to/lvi_slam lvi_slam
-ln -s /path/to/lvi_slam/third_party/livox_ros_driver livox_ros_driver
-cd ~/lvi_ws && catkin_make -DCMAKE_BUILD_TYPE=Release
-# 若 GTSAM 装在非标准前缀：-DGTSAM_DIR=/path/to/gtsam/install/lib/cmake/GTSAM
+#
+# 一键编译脚本：自动剔除 conda、创建上面两个软链接、带上全部编译选项，
+# GTSAM 路径或构建类型变化时自动全量重编。选项见 scripts/build_ros1.sh --help
+scripts/build_ros1.sh                 # 默认工作空间 ~/lvi_ws，Release
+scripts/build_ros1.sh --clean         # 全量重编
+LVI_WS=~/other_ws GTSAM_DIR=/path/to/gtsam/lib/cmake/GTSAM scripts/build_ros1.sh
 
 # ---- ROS2 Humble (Ubuntu 22.04) ----
 sudo apt install ros-humble-desktop
@@ -120,7 +123,7 @@ cd ~/ros2_ws && colcon build --packages-select lvi_slam \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
-跨机分发或做 Docker 镜像时加 `-DNATIVE_ARCH=OFF` 关掉 `-march=native`。
+`-march=native` 默认关闭（`NATIVE_ARCH=OFF`）：apt 的 PCL/OpenCV 按 16 字节对齐编译，开启后 Eigen 对齐不一致会在内存释放时崩溃。只有所有 Eigen 依赖都用 `-march=native` 自编译时才可以 `-DNATIVE_ARCH=ON`。
 
 ## 运行
 
