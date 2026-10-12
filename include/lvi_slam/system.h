@@ -43,6 +43,11 @@ class System {
 
   // 输出
   State currentState() const;
+
+  // 积压的点云帧数（缓冲中的 + 前端正在处理的那一帧）。
+  // 实时运行时不需要关心；离线全速回放必须据此限速，
+  // 否则同步器缓冲满了会静默丢帧。
+  size_t pendingClouds() const { return sync_->pendingClouds() + (busy_ ? 1 : 0); }
   CloudPtr buildGlobalMap(double leaf = 0.2) const;
   bool saveTrajectoryTUM(const std::string& path) const;
   bool saveMapPCD(const std::string& path, double leaf = 0.1) const;
@@ -60,6 +65,7 @@ class System {
   OdometryCallback  odom_callback_;
   std::thread       main_thread_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> busy_{false};      // 前端正在处理一帧
   void mainLoop();
   mutable std::mutex traj_mutex_;
   std::vector<std::pair<double, Eigen::Matrix4d>> trajectory_;

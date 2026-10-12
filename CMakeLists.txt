@@ -9,9 +9,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-# -march=native 能带来可观的 Eigen 加速，但会让二进制不可跨机分发。
-# 默认开启，交叉编译或做 Docker 镜像时用 -DNATIVE_ARCH=OFF 关掉。
-option(NATIVE_ARCH "Enable -march=native" ON)
+# -march=native 默认关闭。
+# 开启后 Eigen 在 AVX 机器上改用 32 字节对齐，并走自己的 aligned_malloc/free；
+# 而 apt 装的 PCL / OpenCV 是按 16 字节对齐编译的，直接用 malloc/free。
+# 一边分配、另一边释放就会崩（典型现场：PCL 的 VoxelGrid::filter 分配点云内存，
+# 本工程析构时释放 → free() 收到错误指针）。
+# 只有当 PCL、GTSAM 等所有传递 Eigen 类型的依赖都用 -march=native 自编译时才能开启。
+option(NATIVE_ARCH "Enable -march=native (all Eigen-using deps must match)" OFF)
 if(NATIVE_ARCH AND CMAKE_BUILD_TYPE STREQUAL "Release")
   include(CheckCXXCompilerFlag)
   check_cxx_compiler_flag("-march=native" HAS_NATIVE)

@@ -42,6 +42,12 @@ class DataSynchronizer {
 
   void reset();
 
+  // 尚未被 trySync 取走的点云帧数。离线回放用它做背压（见 offline_runner）。
+  size_t pendingClouds() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return cloud_buf_.size();
+  }
+
  private:
   // 把点云按 split_time 切成两半：
   //   之前的进 cloud_cur（本轮 LIO 处理）

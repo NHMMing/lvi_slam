@@ -103,6 +103,9 @@ bool parseArgs(int argc, char** argv, Args* a) {
   return !a->config.empty() && !a->data.empty();
 }
 
+// 全速回放时允许的最大点云积压帧数（同步器缓冲上限是 50，远低于它即可）
+constexpr size_t kMaxCloudBacklog = 5;
+
 // 分段计时。总耗时没有信息量，要知道时间花在哪才能优化。
 struct Profiler {
   struct Stat { double total = 0; double max = 0; size_t count = 0; };
@@ -192,6 +195,15 @@ int main(int argc, char** argv) {
       }
     }
 
+    // 全速模式的背压：前端积压过多就等它消化，而不是让同步器缓冲溢出丢帧。
+    // 只在喂点云前等 —— 期间 IMU 照常喂，保证积压的帧都有 IMU 覆盖，不会死锁。
+    // 阈值至少为 2：同步一帧需要 IMU 越过帧尾，也就是下一帧已经开始喂了。
+    if (!args.realtime && msg.type == lvi::MsgType::kCloud) {
+      while (system.pendingClouds() >= kMaxCloudBacklog) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+
     const auto tic = std::chrono::steady_clock::now();
     switch (msg.type) {
       case lvi::MsgType::kImu:
@@ -223,8 +235,20 @@ int main(int argc, char** argv) {
   std::cout << "\n";
 
   // 全速模式下 feed 完不代表算完 —— 前端还在消费队列，等它排空
+  // 最后一帧点云可能因为没有后续 IMU 永远凑不齐，所以不能等到积压为 0，
+  // 而是等到「积压数不再变化且前端空闲」持续一段时间。
   std::cout << "等待前端处理完剩余队列...\n";
-  std::this_thread::sleep_for(std::chrono::seconds(2));
+  {
+    size_t last = system.pendingClouds();
+    auto last_change = std::chrono::steady_clock::now();
+    while (last > 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      const size_t now = system.pendingClouds();
+      if (now != last) { last = now; last_change = std::chrono::steady_clock::now(); continue; }
+      if (std::chrono::steady_clock::now() - last_change > std::chrono::milliseconds(500)) break;
+    }
+    if (last > 0) std::cout << "  " << last << " 帧点云因数据末尾缺少 IMU 未能处理\n";
+  }
   system.stop();
 
   const double wall_total = std::chrono::duration<double>(

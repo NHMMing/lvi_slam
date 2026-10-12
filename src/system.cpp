@@ -68,13 +68,18 @@ void System::feedGps(double t, const V3D& pos, const V3D& cov) {
 void System::mainLoop() {
   SyncPackage pkg;
   while (running_) {
+    // busy_ 在 trySync 之前置位：否则包已出缓冲、还没开始处理的瞬间，
+    // pendingClouds() 会读到 0，离线回放会误以为前端已经处理完。
+    busy_ = true;
     if (!sync_->trySync(&pkg)) {
+      busy_ = false;
       // 没有数据就短睡，不要忙等 —— 忙等会把一个核吃满，
       // 在嵌入式平台上直接影响其他线程。
       std::this_thread::sleep_for(std::chrono::microseconds(200));
       continue;
     }
-    if (!frontend_->process(pkg)) continue;
+    const bool ok = frontend_->process(pkg);
+    if (!ok) { busy_ = false; continue; }
 
     const State& s = frontend_->state();
     {
@@ -86,6 +91,7 @@ void System::mainLoop() {
     }
     // 前端更新后的位姿精度高于 IMU 前推，覆盖发布
     if (odom_callback_) odom_callback_(s, s.timestamp);
+    busy_ = false;
   }
 }
 
