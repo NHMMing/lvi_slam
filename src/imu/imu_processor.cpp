@@ -36,6 +36,11 @@ bool ImuProcessor::tryInitialize(const std::vector<ImuData>& imus, State* state)
   const double acc_norm = mean_acc_.norm();
   if (acc_norm < 1e-3) return false;
 
+  // 加速度单位自适应：Livox 内置 IMU（Avia/Horizon）输出单位是 g 而非 m/s^2。
+  // 静止时 |acc| 应等于当地重力，据此求比例系数，之后所有加速度读数都乘上它。
+  // 已经是 m/s^2 的 IMU 这里约等于 1，相当于顺带做了一次模长校正。
+  acc_scale_ = cfg_.imu.gravity_norm / acc_norm;
+
   // 静止时加速度计读数就是 -g（IMU 系下）
   state->grav = -mean_acc_ / acc_norm * cfg_.imu.gravity_norm;
   state->bg = mean_gyr_;     // 静止时陀螺读数即 bias
@@ -70,7 +75,7 @@ void ImuProcessor::propagateWithCov(const ImuData& prev, const ImuData& curr,
   if (dt <= 0.0 || dt > 0.5) return;   // 异常 dt 直接跳过，防止发散
 
   const V3D gyr_mid = 0.5 * (prev.gyr + curr.gyr) - s->bg;
-  const V3D acc_raw_mid = 0.5 * (prev.acc + curr.acc) - s->ba;
+  const V3D acc_raw_mid = 0.5 * (prev.acc + curr.acc) * acc_scale_ - s->ba;
 
   const M3D R_old = s->rot;
   const M3D dR = so3::Exp(gyr_mid, dt);
@@ -95,7 +100,11 @@ void ImuProcessor::propagateWithCov(const ImuData& prev, const ImuData& curr,
   G.block<3, 3>(kIdxBg, 6)  = M3D::Identity() * dt;
   G.block<3, 3>(kIdxBa, 9)  = M3D::Identity() * dt;
 
-  s->cov = F * s->cov * F.transpose() + G * Q_ * G.transpose();
+  // Q_ 存的是连续时间噪声密度的平方（config 里的单位是 /sqrt(Hz)）。
+  // 离散化后单步方差应为 σ²·dt，而 G 里已经带了一个 dt（G Q Gᵀ ∝ dt²），
+  // 所以这里除以 dt。漏掉这一步过程噪声会小 1/dt 倍（200Hz 下 200 倍），
+  // 滤波器过度自信，卡方检验会把正确的点面匹配也剔掉。
+  s->cov = F * s->cov * F.transpose() + G * (Q_ / dt) * G.transpose();
 
   // ---- 名义状态传播 ----
   s->pos += s->vel * dt + 0.5 * acc_w * dt * dt;
@@ -107,7 +116,7 @@ void ImuProcessor::propagateWithCov(const ImuData& prev, const ImuData& curr,
 void ImuProcessor::propagateOnce(const ImuData& imu, double dt, State* s) const {
   if (dt <= 0.0 || dt > 0.5) return;
   const V3D gyr = imu.gyr - s->bg;
-  const V3D acc = s->rot * (imu.acc - s->ba) + s->grav;
+  const V3D acc = s->rot * (imu.acc * acc_scale_ - s->ba) + s->grav;
   s->rot = s->rot * so3::Exp(gyr, dt);
   s->pos += s->vel * dt + 0.5 * acc * dt * dt;
   s->vel += acc * dt;

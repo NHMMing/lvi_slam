@@ -52,6 +52,7 @@ class ImuProcessor {
   V3D    mean_acc_ = V3D::Zero();
   V3D    mean_gyr_ = V3D::Zero();
   int    init_count_ = 0;
+  double acc_scale_ = 1.0;   // 加速度单位换算系数，静止初始化时确定
 
   ImuData last_imu_;
 

@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 namespace {
@@ -153,9 +154,14 @@ int main(int argc, char** argv) {
   system.start();
 
   Profiler prof;
-  const double t0 = source->startTime();
-  const double t_begin = t0 + args.start_offset;
-  const double t_end = (args.duration > 0) ? t_begin + args.duration : source->endTime();
+  // --start / --duration 以第一条消息的 header.stamp 为零点，而不是 bag 的录制时间。
+  // 很多设备（如 Livox Avia 未接 PTP/GPS 时）header.stamp 是开机时钟（几百秒），
+  // 而 bag 时间是 Unix 时间，两者直接比较会把所有消息都判成「早于起点」。
+  // source 的 start/end 只用来拿总时长（同一时钟域内的差值，与时钟基准无关）。
+  const double total_span = source->endTime() - source->startTime();
+  double t_begin = 0, t_end = 0;
+  bool time_anchored = false;
+  double last_msg_time = 0;
 
   size_t n_imu = 0, n_cloud = 0, n_img = 0, n_gps = 0, n_skipped = 0;
   auto wall_start = std::chrono::steady_clock::now();
@@ -163,8 +169,15 @@ int main(int argc, char** argv) {
 
   lvi::SourceMessage msg;
   while (source->next(&msg)) {
+    if (!time_anchored) {
+      t_begin = msg.t + args.start_offset;
+      t_end = (args.duration > 0) ? t_begin + args.duration
+                                  : std::numeric_limits<double>::infinity();
+      time_anchored = true;
+    }
     if (msg.t < t_begin) { ++n_skipped; continue; }
     if (msg.t > t_end) break;
+    last_msg_time = msg.t;
     if (first_msg_time < 0) first_msg_time = msg.t;
 
     // 实时模式：按数据时间戳节奏 sleep。
@@ -199,7 +212,9 @@ int main(int argc, char** argv) {
 
     // 进度条
     if ((n_cloud + n_img) % 50 == 0 && msg.type != lvi::MsgType::kImu) {
-      const double pct = 100.0 * (msg.t - t_begin) / std::max(1e-6, t_end - t_begin);
+      const double span = (args.duration > 0) ? args.duration
+                                               : total_span - args.start_offset;
+      const double pct = 100.0 * (msg.t - t_begin) / std::max(1e-6, span);
       std::cout << "\r进度 " << std::fixed << std::setprecision(1) << pct
                 << "%  点云 " << n_cloud << "  图像 " << n_img
                 << "  IMU " << n_imu << std::flush;
@@ -214,7 +229,7 @@ int main(int argc, char** argv) {
 
   const double wall_total = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - wall_start).count();
-  const double data_span = t_end - t_begin;
+  const double data_span = (first_msg_time < 0) ? 0.0 : last_msg_time - first_msg_time;
 
   std::cout << "\n===== 回放统计 =====\n"
             << "数据时长: " << std::fixed << std::setprecision(2) << data_span << " s\n"

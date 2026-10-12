@@ -42,14 +42,19 @@ Frontend::Frontend(const Config& cfg) : cfg_(cfg) {
   state_.ext_rot_ci = cfg.extrinsic.ext_rot_ci;
   state_.ext_pos_ci = cfg.extrinsic.ext_pos_ci;
 
-  // 初始协方差：编码可观性分析的结论。
-  // 4 个不可观自由度（xyz + yaw）给大方差，roll/pitch 给小方差
-  // （IMU 加速度计感知重力方向，roll/pitch 绝对可观）。
-  // 这和 LIO-SAM 第一帧先验因子的噪声 [1e-2,1e-2,pi^2,1e8,1e8,1e8] 是同一个道理。
+  // 初始协方差。
+  // 地图由首帧点云建立，世界系就锚定在首帧位姿上，所以首帧位姿「相对地图」
+  // 是精确已知的 —— xyz 和 yaw 虽然全局不可观，但在本滤波器里不需要大方差。
+  // （LIO-SAM 先验因子给 1e8 是因为它的地图不锚定在首帧，两者不能类比。）
+  // 而且位姿方差会传播进每个点的观测噪声（LioUpdater::propagatePointCov），
+  // 这里给大方差会让 LIO 观测权重趋近于 0，系统退化成纯 IMU 积分。
+  // 量级参考 FAST-LIO / VoxelMap。
   state_.cov.setIdentity();
-  state_.cov.block<2, 2>(kIdxRot, kIdxRot)     *= 1e-4;   // roll, pitch
-  state_.cov(kIdxRot + 2, kIdxRot + 2)          = 1e4;    // yaw 不可观
-  state_.cov.block<3, 3>(kIdxPos, kIdxPos)     *= 1e4;    // 全局位置不可观
+  state_.cov.block<3, 3>(kIdxRot, kIdxRot)     *= 1e-4;
+  state_.cov.block<3, 3>(kIdxPos, kIdxPos)     *= 1e-4;
+  state_.cov.block<3, 3>(kIdxBg, kIdxBg)       *= 1e-4;   // 静止初始化已估计
+  state_.cov.block<3, 3>(kIdxBa, kIdxBa)       *= 1e-3;
+  state_.cov.block<3, 3>(kIdxGrav, kIdxGrav)   *= 1e-5;   // 静止初始化已估计
   state_.cov.block<3, 3>(kIdxExtRot, kIdxExtRot) *= 1e-6; // 外参：极小过程噪声
   state_.cov.block<3, 3>(kIdxExtPos, kIdxExtPos) *= 1e-6;
 }
@@ -89,7 +94,9 @@ bool Frontend::process(const SyncPackage& pkg) {
 
   // ---- 4. 退化分析 ----
   degen_ = iekf_->analyzeDegeneracy(state_);
-  if (degen_.is_degenerate) adaptCrossModalWeights();
+  // 跨模态补偿只在有另一个模态可补时才有意义。纯 LIO 下放大协方差只会
+  // 让下一帧继续判定为退化、继续放大（正反馈），最终把 LIO 权重压到 0。
+  if (degen_.is_degenerate && vio_) adaptCrossModalWeights();
 
   // ---- 5. 关键帧产出 ----
   if (shouldCreateKeyframe()) createKeyframe(pkg);

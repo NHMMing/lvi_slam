@@ -24,9 +24,12 @@ bool IEKF::update(ObservationModel* model, const State& prior, State* state) {
       return false;
     }
 
-    // 残差变大说明上一步走过头了，回退并结束
+    // 残差变大说明上一步走过头了，回退并结束。
+    // 回退后的状态正是上一轮 G 的线性化点，协方差更新仍然要做——
+    // 否则这一帧的观测信息被丢掉，协方差只增不减，几帧后 LIO 权重就趋近于 0。
     if (res.mean_error > last_error) {
       *state = best_state;
+      state->cov = (I - G) * state->cov;
       break;
     }
     best_state = *state;
