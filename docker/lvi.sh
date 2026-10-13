@@ -28,6 +28,8 @@
 #   LVI_REGISTRY  镜像仓库前缀，默认 ghcr.io/nhmming
 #   LVI_IMAGE     直接指定镜像（覆盖变体推导）
 #   APT_MIRROR    构建时替换 Ubuntu apt 源，如 http://mirrors.tuna.tsinghua.edu.cn
+#   LVI_JOBS      镜像构建的并行编译数，默认 min(nproc, 可用内存GB/2)——GTSAM 每个编译进程
+#                 峰值约 1.5-2GB，按核数开满在 16 核 / 16GB 的机器上会 OOM
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,6 +77,16 @@ proxy_env() {
 }
 
 # ---- 构建镜像 ----
+default_jobs() {
+  [[ -n "${LVI_JOBS:-}" ]] && { echo "$LVI_JOBS"; return; }
+  local n mem_gb
+  n=$(nproc)
+  mem_gb=$(awk '/MemAvailable/ {print int($2 / 1048576)}' /proc/meminfo)
+  (( mem_gb / 2 < n )) && n=$(( mem_gb / 2 ))
+  (( n < 1 )) && n=1
+  echo "$n"
+}
+
 cmd_image() {
   local target=deps platform="" push=0
   while [[ $# -gt 0 ]]; do
@@ -93,7 +105,7 @@ cmd_image() {
   rev="$(git -C "$REPO" describe --always --dirty --abbrev=12 2>/dev/null || echo unknown)"
   args=(--file "$REPO/docker/Dockerfile" --target "$target"
         --build-arg ROS_DISTRO="$DISTRO" --build-arg LVI_GIT_REV="$rev"
-        --build-arg APT_MIRROR="${APT_MIRROR:-}"
+        --build-arg APT_MIRROR="${APT_MIRROR:-}" --build-arg JOBS="$(default_jobs)"
         --network host --tag "$tag")
   # 代理变量是 Docker 预定义的构建参数，不会写进镜像层
   local v
@@ -159,7 +171,7 @@ cmd_build() {
     esac
     shift
   done
-  run_container 0 env BUILD_TYPE="$bt" RUN_TESTS="$tests" /lvi_slam/docker/ws_build.sh
+  run_container 0 env BUILD_TYPE="$bt" RUN_TESTS="$tests" JOBS="$(default_jobs)" /lvi_slam/docker/ws_build.sh
 }
 
 case "$CMD" in

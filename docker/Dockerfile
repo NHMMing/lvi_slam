@@ -25,6 +25,8 @@ FROM base-${ROS_DISTRO} AS deps
 ARG ROS_DISTRO
 # 可选 apt 镜像，例如 http://mirrors.tuna.tsinghua.edu.cn（只替换 Ubuntu 源，不动 ROS 源）
 ARG APT_MIRROR=""
+# 并行编译数（空 = nproc）。ARG 在 RUN 里就是环境变量，install_deps.sh / ws_build.sh 直接读取
+ARG JOBS=""
 ENV ROS_DISTRO=${ROS_DISTRO} \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     DEBIAN_FRONTEND=noninteractive \
@@ -46,6 +48,7 @@ FROM deps AS build
 # 源码里不带 .git（见 .dockerignore），版本号由构建参数传入，写进 run_meta.json
 ARG LVI_GIT_REV=unknown
 ARG BUILD_TYPE=Release
+ARG JOBS=""
 COPY . /lvi_slam
 RUN LVI_GIT_REV=${LVI_GIT_REV} BUILD_TYPE=${BUILD_TYPE} /lvi_slam/docker/ws_build.sh
 
