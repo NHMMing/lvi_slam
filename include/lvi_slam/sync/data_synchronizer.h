@@ -48,6 +48,13 @@ class DataSynchronizer {
     return cloud_buf_.size();
   }
 
+  // 缓冲溢出丢弃的消息数。非零说明前端跟不上数据速率（实时性不足）。
+  struct DropStats { size_t imu = 0, cloud = 0, image = 0; };
+  DropStats dropStats() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return drops_;
+  }
+
  private:
   // 把点云按 split_time 切成两半：
   //   之前的进 cloud_cur（本轮 LIO 处理）
@@ -73,6 +80,7 @@ class DataSynchronizer {
   double last_update_time_ = -1.0;
   double td_ = 0.0;
   double exposure_time_ = 0.0;   // 曝光时间常量偏移（配置项）
+  DropStats drops_;
 };
 
 }  // namespace lvi

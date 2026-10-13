@@ -13,12 +13,19 @@
 //   3. 分段计时。总耗时没有信息量，要知道时间花在哪。
 #include "lvi_slam/system.h"
 #include "lvi_slam/io/data_source.h"
+#include "lvi_git_rev.h"
 
+#include <unistd.h>
+
+#include <atomic>
 #include <chrono>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -26,7 +33,8 @@ namespace {
 struct Args {
   std::string config;
   std::string data;
-  std::string out = "trajectory.tum";
+  std::string out;               // 只要 odometry 轨迹时用（兼容旧用法）
+  std::string out_dir;           // 完整评估输出目录
   std::string profile = "livox";
   bool   realtime = false;
   double speed = 1.0;
@@ -44,7 +52,15 @@ void printUsage() {
   --data <path>         ROS2 bag（.db3/.mcap/目录）或 KITTI 风格文件夹
 
 可选:
-  --out <path>          输出 TUM 轨迹（默认 trajectory.tum）
+  --out-dir <dir>       评估输出目录（推荐），包含:
+                          odometry.tum  前端逐帧在线位姿（含回环跳变）
+                          slam.tum      逐帧位姿，按后端最终优化结果重新表达
+                          keyframes.tum 后端关键帧最终位姿
+                          frames.csv    逐帧滤波器诊断（耗时/残差/退化/协方差/bias/td）
+                          loops.csv     回环候选及验证结果
+                          resources.csv 内存与 CPU 采样
+                          run_meta.json 版本、参数、统计；config_used.yaml 配置副本
+  --out <path>          只输出 odometry 轨迹到指定文件（未给 --out-dir 时默认 trajectory.tum）
   --profile <name>      点云剖面: livox|ouster|velodyne|hesai|kitti（默认 livox）
   --imu-topic <name>    默认 /livox/imu
   --lidar-topic <name>  默认 /livox/lidar
@@ -71,8 +87,7 @@ void printUsage() {
       --profile hesai --imu-topic /alphasense/imu --lidar-topic /hesai/pandar
 
 评估:
-  evo_ape tum groundtruth.tum trajectory.tum -va --plot
-  evo_rpe tum groundtruth.tum trajectory.tum -va --delta 100 --delta_unit m
+  lvi_eval run --gt groundtruth.tum --run <out-dir>
 )" << std::endl;
 }
 
@@ -88,6 +103,7 @@ bool parseArgs(int argc, char** argv, Args* a) {
     if      (k == "--config")      a->config = val();
     else if (k == "--data")        a->data = val();
     else if (k == "--out")         a->out = val();
+    else if (k == "--out-dir")     a->out_dir = val();
     else if (k == "--profile")     a->profile = val();
     else if (k == "--imu-topic")   a->topics.imu = val();
     else if (k == "--lidar-topic") a->topics.lidar = val();
@@ -100,6 +116,7 @@ bool parseArgs(int argc, char** argv, Args* a) {
     else if (k == "-h" || k == "--help") { printUsage(); return false; }
     else { std::cerr << "未知参数: " << k << "\n"; return false; }
   }
+  if (a->out.empty() && a->out_dir.empty()) a->out = "trajectory.tum";
   return !a->config.empty() && !a->data.empty();
 }
 
@@ -135,6 +152,92 @@ struct Profiler {
   }
 };
 
+// 进程资源采样（Linux /proc）。内存曲线用来验证「局部地图有界」——
+// 只看峰值看不出泄漏，要看随时间是否持续增长。
+class ResourceSampler {
+ public:
+  struct Sample { double wall, data_t, rss_mb, cpu_pct; };
+  ~ResourceSampler() { stop(); }
+
+  void start(const std::atomic<double>* data_t) {
+    data_t_ = data_t;
+    running_ = true;
+    th_ = std::thread([this] { loop(); });
+  }
+  void stop() {
+    running_ = false;
+    if (th_.joinable()) th_.join();
+  }
+  const std::vector<Sample>& samples() const { return samples_; }
+  double peakRssMb() const {
+    double m = 0;
+    for (const auto& s : samples_) m = std::max(m, s.rss_mb);
+    return m;
+  }
+
+ private:
+  static double rssMb() {
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    while (std::getline(f, line)) {
+      if (line.rfind("VmRSS:", 0) == 0) return std::stod(line.substr(6)) / 1024.0;
+    }
+    return 0;
+  }
+  static double cpuSec() {   // utime + stime，所有线程合计
+    std::ifstream f("/proc/self/stat");
+    std::string content((std::istreambuf_iterator<char>(f)), {});
+    std::istringstream is(content.substr(content.rfind(')') + 2));
+    std::string tok;
+    double ut = 0, st = 0;
+    for (int field = 3; is >> tok; ++field) {
+      if (field == 14) ut = std::stod(tok);
+      if (field == 15) { st = std::stod(tok); break; }
+    }
+    return (ut + st) / static_cast<double>(sysconf(_SC_CLK_TCK));
+  }
+  void loop() {
+    const auto t0 = std::chrono::steady_clock::now();
+    double last_wall = 0, last_cpu = cpuSec();
+    while (running_) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      const double wall = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - t0).count();
+      const double cpu = cpuSec();
+      samples_.push_back({wall, data_t_->load(), rssMb(),
+                          100.0 * (cpu - last_cpu) / std::max(1e-6, wall - last_wall)});
+      last_wall = wall;
+      last_cpu = cpu;
+    }
+  }
+
+  const std::atomic<double>* data_t_ = nullptr;
+  std::atomic<bool> running_{false};
+  std::thread th_;
+  std::vector<Sample> samples_;
+};
+
+std::string jsonEscape(const std::string& in) {
+  std::string out;
+  for (char c : in) {
+    if (c == '"' || c == '\\') out += '\\';
+    out += c;
+  }
+  return out;
+}
+
+std::string cpuModel() {
+  std::ifstream f("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(f, line)) {
+    // x86: "model name"；ARM（Orin）没有 model name，退而取 "Hardware"/"CPU part"
+    if (line.rfind("model name", 0) == 0 || line.rfind("Hardware", 0) == 0) {
+      return line.substr(line.find(':') + 2);
+    }
+  }
+  return "unknown";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -153,8 +256,19 @@ int main(int argc, char** argv) {
   auto source = lvi::DataSource::create(args.data, cfg, args.topics, profile);
   if (!source) return 1;
 
+  if (!args.out_dir.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(args.out_dir, ec);
+    if (ec) { std::cerr << "无法创建输出目录 " << args.out_dir << ": " << ec.message() << "\n"; return 1; }
+  }
+
   lvi::System system(cfg);
+  if (!args.out_dir.empty()) system.enableDiagnostics(true);
   system.start();
+
+  std::atomic<double> progress_t{0.0};   // 当前喂到的数据时间（相对首条消息）
+  ResourceSampler sampler;
+  sampler.start(&progress_t);
 
   Profiler prof;
   // --start / --duration 以第一条消息的 header.stamp 为零点，而不是 bag 的录制时间。
@@ -182,6 +296,7 @@ int main(int argc, char** argv) {
     if (msg.t > t_end) break;
     last_msg_time = msg.t;
     if (first_msg_time < 0) first_msg_time = msg.t;
+    progress_t = msg.t - first_msg_time;
 
     // 实时模式：按数据时间戳节奏 sleep。
     // 全速模式下系统永远不会「跟不上」，很多实时性 bug 会被掩盖。
@@ -249,7 +364,9 @@ int main(int argc, char** argv) {
     }
     if (last > 0) std::cout << "  " << last << " 帧点云因数据末尾缺少 IMU 未能处理\n";
   }
-  system.stop();
+  std::cout << "等待后端完成最终优化...\n";
+  system.finish();
+  sampler.stop();
 
   const double wall_total = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - wall_start).count();
@@ -263,6 +380,13 @@ int main(int argc, char** argv) {
             << "消息数: IMU=" << n_imu << " 点云=" << n_cloud
             << " 图像=" << n_img << " GPS=" << n_gps
             << " 跳过=" << n_skipped << "\n";
+  const auto drops = system.dropStats();
+  if (drops.imu + drops.cloud + drops.image > 0) {
+    std::cerr << "[警告] 缓冲溢出丢弃: IMU=" << drops.imu << " 点云=" << drops.cloud
+              << " 图像=" << drops.image << "（前端跟不上数据速率）\n";
+  }
+  std::cout << "峰值内存: " << std::setprecision(1) << sampler.peakRssMb() << " MB\n"
+            << std::setprecision(2);
 
   // 数据完整性自检。这几个比率不对，说明话题名配错或者 bag 本身有问题。
   if (n_cloud > 0) {
@@ -282,11 +406,68 @@ int main(int argc, char** argv) {
 
   prof.report();
 
-  system.saveTrajectoryTUM(args.out);
-  std::cout << "\n轨迹已保存: " << args.out << "\n"
+  if (!args.out.empty()) system.saveTrajectoryTUM(args.out);
+  if (args.out_dir.empty()) {
+    std::cout << "\n轨迹已保存: " << args.out << "\n";
+    return 0;
+  }
+
+  namespace fs = std::filesystem;
+  const fs::path dir(args.out_dir);
+  system.saveTrajectoryTUM((dir / "odometry.tum").string());
+  system.saveSlamTrajectoryTUM((dir / "slam.tum").string());
+  system.saveKeyframesTUM((dir / "keyframes.tum").string());
+  system.saveFrameDiagCSV((dir / "frames.csv").string());
+  system.saveLoopEventsCSV((dir / "loops.csv").string());
+  {
+    std::ofstream f(dir / "resources.csv");
+    f << "wall_s,data_s,rss_mb,cpu_pct\n";
+    for (const auto& r : sampler.samples()) {
+      f << r.wall << "," << r.data_t << "," << r.rss_mb << "," << r.cpu_pct << "\n";
+    }
+  }
+  std::error_code ec;
+  fs::copy_file(args.config, dir / "config_used.yaml",
+                fs::copy_options::overwrite_existing, ec);
+
+  {
+    char host[256] = {0};
+    gethostname(host, sizeof(host) - 1);
+    const std::time_t now = std::time(nullptr);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+    std::string argv_str;
+    for (int i = 0; i < argc; ++i) argv_str += (i ? " " : "") + std::string(argv[i]);
+
+    std::ofstream f(dir / "run_meta.json");
+    f << std::setprecision(6) << "{\n"
+      << "  \"git_rev\": \"" << LVI_GIT_REV << "\",\n"
+      << "  \"build_type\": \"" << LVI_BUILD_TYPE << "\",\n"
+      << "  \"date\": \"" << stamp << "\",\n"
+      << "  \"host\": \"" << jsonEscape(host) << "\",\n"
+      << "  \"cpu\": \"" << jsonEscape(cpuModel()) << "\",\n"
+      << "  \"nproc\": " << std::thread::hardware_concurrency() << ",\n"
+      << "  \"command\": \"" << jsonEscape(argv_str) << "\",\n"
+      << "  \"config\": \"" << jsonEscape(args.config) << "\",\n"
+      << "  \"data\": \"" << jsonEscape(args.data) << "\",\n"
+      << "  \"profile\": \"" << args.profile << "\",\n"
+      << "  \"realtime\": " << (args.realtime ? "true" : "false") << ",\n"
+      << "  \"speed\": " << args.speed << ",\n"
+      << "  \"data_start\": " << std::fixed << std::setprecision(9) << first_msg_time << ",\n"
+      << std::defaultfloat << std::setprecision(6)
+      << "  \"data_span_s\": " << data_span << ",\n"
+      << "  \"wall_s\": " << wall_total << ",\n"
+      << "  \"realtime_factor\": " << (wall_total > 0 ? data_span / wall_total : 0) << ",\n"
+      << "  \"peak_rss_mb\": " << sampler.peakRssMb() << ",\n"
+      << "  \"messages\": {\"imu\": " << n_imu << ", \"cloud\": " << n_cloud
+      << ", \"image\": " << n_img << ", \"gps\": " << n_gps << "},\n"
+      << "  \"dropped\": {\"imu\": " << drops.imu << ", \"cloud\": " << drops.cloud
+      << ", \"image\": " << drops.image << "}\n"
+      << "}\n";
+  }
+
+  std::cout << "\n评估数据已保存到 " << args.out_dir << "\n"
             << "评估命令:\n"
-            << "  evo_ape tum <groundtruth.tum> " << args.out << " -va --plot\n"
-            << "  evo_rpe tum <groundtruth.tum> " << args.out
-            << " -va --delta 100 --delta_unit m\n";
+            << "  lvi_eval run --gt <groundtruth> --run " << args.out_dir << "\n";
   return 0;
 }

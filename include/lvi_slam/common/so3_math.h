@@ -70,7 +70,6 @@ inline Eigen::Matrix3d JrInv(const Eigen::Vector3d& phi) {
   const double theta = phi.norm();
   if (theta < 1e-7) return Eigen::Matrix3d::Identity() + 0.5 * Hat(phi);
   const Eigen::Matrix3d A = Hat(phi);
-  const double half = 0.5 * theta;
   return Eigen::Matrix3d::Identity()
        + 0.5 * A
        + (1.0 / (theta * theta) - (1.0 + std::cos(theta)) / (2.0 * theta * std::sin(theta))) * A * A;

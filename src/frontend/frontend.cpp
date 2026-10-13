@@ -68,6 +68,7 @@ bool Frontend::initialized() const {
 
 bool Frontend::process(const SyncPackage& pkg) {
   if (system_start_time_ < 0) system_start_time_ = pkg.sync_time;
+  diag_ = FrameDiag();
 
   // ---- 1. IMU 初始化（静止估重力和陀螺 bias）----
   if (!imu_->initialized()) {
@@ -90,10 +91,11 @@ bool Frontend::process(const SyncPackage& pkg) {
     case UpdateMode::kVio: ok = handleVio(pkg); break;
     default: return false;
   }
-  if (!ok) return false;
+  if (!ok) { fillDiag(pkg, false); return false; }
 
   // ---- 4. 退化分析 ----
   degen_ = iekf_->analyzeDegeneracy(state_);
+  fillDiag(pkg, true);   // 记录的是跨模态补偿之前、更新刚结束时的协方差
   // 跨模态补偿只在有另一个模态可补时才有意义。纯 LIO 下放大协方差只会
   // 让下一帧继续判定为退化、继续放大（正反馈），最终把 LIO 权重压到 0。
   if (degen_.is_degenerate && vio_) adaptCrossModalWeights();
@@ -198,27 +200,85 @@ void Frontend::createKeyframe(const SyncPackage& pkg) {
   last_kf_pos_  = state_.pos;
   last_kf_time_ = state_.timestamp;
 
+  kf_poses_.push_back({kf->id, state_.rot, state_.pos});
+  while (kf_poses_.size() > kKfPoseHistory) kf_poses_.pop_front();
+
   if (kf_callback_) kf_callback_(kf);
 }
 
+bool Frontend::keyframePose(int id, M3D* rot, V3D* pos) const {
+  // id 连续递增，直接按偏移定位
+  if (kf_poses_.empty()) return false;
+  const int idx = id - kf_poses_.front().id;
+  if (idx < 0 || idx >= static_cast<int>(kf_poses_.size())) return false;
+  *rot = kf_poses_[idx].rot;
+  *pos = kf_poses_[idx].pos;
+  return true;
+}
+
+void Frontend::fillDiag(const SyncPackage& pkg, bool ok) {
+  diag_.t    = state_.timestamp;
+  diag_.mode = pkg.mode == UpdateMode::kLio ? 1 : 2;
+  diag_.ok   = ok;
+  const auto& st = iekf_->lastStats();
+  diag_.iterations = st.iterations;
+  diag_.num_valid  = st.num_valid;
+  diag_.mean_error = st.mean_error;
+  diag_.converged  = st.converged;
+  diag_.degenerate_mask = 0;
+  if (ok) {
+    for (int d : degen_.degenerate_dims) diag_.degenerate_mask |= 1 << d;
+  }
+  if (vio_ && pkg.mode == UpdateMode::kVio) {
+    diag_.vio_track =
+        vio_->currentTrack() == HybridVisualUpdater::Track::kDirect ? 0 : 1;
+  }
+  diag_.pose_cov = state_.cov.block<6, 6>(0, 0);
+  diag_.td = state_.td;
+  diag_.bg = state_.bg;
+  diag_.ba = state_.ba;
+}
+
 void Frontend::applyLoopCorrection(const std::vector<KeyframePtr>& corrected_kfs,
-                                   const M3D& corrected_rot,
-                                   const V3D& corrected_pos) {
+                                   int anchor_kf_id,
+                                   const M3D& anchor_rot, const V3D& anchor_pos) {
+  M3D kf_rot;
+  V3D kf_pos;
+  if (!keyframePose(anchor_kf_id, &kf_rot, &kf_pos)) {
+    std::cerr << "[Frontend] loop correction dropped: keyframe " << anchor_kf_id
+              << " not in pose history\n";
+    return;
+  }
+
+  // 修正变换 T_c = T_opt · T_odom⁻¹：把前端世界系映射到回环修正后的世界系。
+  // 作用到状态上要连同速度、重力一起旋转，否则 IMU 传播在新坐标系下不自洽。
+  const M3D R_c = anchor_rot * kf_rot.transpose();
+  const V3D t_c = anchor_pos - R_c * kf_pos;
+
   // 1. 用后端修正过的关键帧位姿重建前端局部地图。
   //    只重建最近 N 帧覆盖的范围，代价可控。
   map_->rebuildFromKeyframes(corrected_kfs);
 
-  // 2. 把 iEKF 状态搬到修正后的位姿。
+  // 2. 把 iEKF 状态搬到修正后的坐标系。
   //    协方差不重置——回环降低了不确定度，但这个信息量化地传回滤波器
   //    需要更严谨的处理（当前版本先保守地保持原协方差）。
-  state_.rot = corrected_rot;
-  state_.pos = corrected_pos;
+  state_.rot  = R_c * state_.rot;
+  state_.pos  = R_c * state_.pos + t_c;
+  state_.vel  = R_c * state_.vel;
+  state_.grav = R_c * state_.grav;
 
-  last_kf_rot_ = corrected_rot;
-  last_kf_pos_ = corrected_pos;
+  last_kf_rot_ = R_c * last_kf_rot_;
+  last_kf_pos_ = R_c * last_kf_pos_ + t_c;
+  last_loop_kf_pos_ = R_c * last_loop_kf_pos_ + t_c;
+  for (auto& kp : kf_poses_) {
+    kp.rot = R_c * kp.rot;
+    kp.pos = R_c * kp.pos + t_c;
+  }
 
-  std::cout << "[Frontend] loop correction applied, local map rebuilt from "
-            << corrected_kfs.size() << " keyframes\n";
+  std::cout << "[Frontend] loop correction applied (|dt|="
+            << t_c.norm() << " m, |dR|=" << so3::Log(R_c).norm() * 57.29578
+            << " deg), local map rebuilt from " << corrected_kfs.size()
+            << " keyframes\n";
 }
 
 void Frontend::adaptCrossModalWeights() {

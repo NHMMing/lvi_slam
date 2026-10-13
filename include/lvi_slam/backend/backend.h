@@ -15,9 +15,12 @@
 #include "lvi_slam/common/types.h"
 #include "lvi_slam/common/config.h"
 #include "lvi_slam/backend/loop_detector.h"
+#include "lvi_slam/common/diagnostics.h"
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 
 // GTSAM 前向声明，避免头文件污染
@@ -43,10 +46,23 @@ class Backend {
   // GPS 数据（可选）
   void addGps(double t, const V3D& pos_enu, const V3D& cov_diag);
 
-  // 回环优化完成后的回调，前端订阅以重建局部地图
+  // 回环优化完成后的回调，前端订阅以重建局部地图。
+  // 参数：最近若干关键帧的位姿快照（独立副本，点云共享），
+  //       以及作为修正基准的关键帧 id 和它优化后的位姿。
+  // 在后端线程里调用；接收方负责转交给前端线程执行。
   using LoopCallback = std::function<void(const std::vector<KeyframePtr>&,
-                                          const M3D&, const V3D&)>;
+                                          int, const M3D&, const V3D&)>;
   void setLoopCallback(LoopCallback cb) { loop_callback_ = std::move(cb); }
+
+  // 阻塞直到队列中的关键帧全部入图（离线评估收尾用），超时返回 false
+  bool flush(double timeout_sec = 30.0);
+  // stop() 之后调用：把尚未入图的回环约束加进去，再做一次完整优化并写回全部关键帧位姿。
+  // 平时只有回环发生时才写回，两次回环之间旧关键帧的小幅修正不会体现在 keyframes() 里。
+  void finalize();
+
+  // 回环检测诊断事件（线程安全拷贝）
+  void enableDiagnostics(bool on) { diag_enabled_ = on; }
+  std::vector<LoopEvent> loopEvents() const;
 
   // 拼接全局地图（按需，不常驻内存）
   CloudPtr buildGlobalMap(double leaf_size = 0.2) const;
@@ -94,6 +110,13 @@ class Backend {
   std::thread opt_thread_, loop_thread_;
   std::atomic<bool> running_{false};
   std::atomic<bool> loop_closed_{false};
+  std::atomic<bool> optimizing_{false};   // 已从队列取出、尚未入图的关键帧
+
+  std::atomic<bool> diag_enabled_{false};
+  mutable std::mutex event_mutex_;
+  std::vector<LoopEvent> loop_events_;
+  void recordLoopEvent(const LoopConstraint& lc, LoopStage stage,
+                       const std::vector<KeyframePtr>& kfs);
 };
 
 }  // namespace lvi

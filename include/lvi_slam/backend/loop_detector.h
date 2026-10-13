@@ -27,6 +27,11 @@ struct LoopConstraint {
   double noise = 1.0;       // 用 ICP fitness 自适应，匹配越好噪声越小
   bool   verified_lidar  = false;
   bool   verified_visual = false;
+
+  // 诊断：本次检索走到了哪一步（通过 SC 阈值之后才有意义）
+  bool   sc_hit = false;
+  double sc_dist = -1.0;
+  double icp_fitness = -1.0;
 };
 
 class LoopDetector {

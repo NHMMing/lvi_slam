@@ -68,6 +68,15 @@ class IEKF {
   // 而是相对 prior 的总增量，所以更新方程里有 (prior ⊟ state) 这一项。
   bool update(ObservationModel* model, const State& prior, State* state);
 
+  // 最近一次 update 的统计，只用于诊断记录
+  struct UpdateStats {
+    int    iterations = 0;
+    int    num_valid  = 0;
+    double mean_error = 0.0;
+    bool   converged  = false;
+  };
+  const UpdateStats& lastStats() const { return last_stats_; }
+
   // 退化分析：返回更新后各状态方向的不确定度增长情况。
   // 与 LIO-SAM 的做法不同——我们看的是协方差而非 Hessian 特征值，
   // 阈值有物理量纲（米 / 弧度），不依赖具体传感器。
@@ -84,6 +93,7 @@ class IEKF {
 
  private:
   Options opt_;
+  UpdateStats last_stats_;
 };
 
 }  // namespace lvi

@@ -226,8 +226,9 @@ void Backend::optimizeThread() {
       if (!running_) break;
       kf = pending_kfs_.front();
       pending_kfs_.pop_front();
+      optimizing_ = true;
     }
-    if (!kf) continue;
+    if (!kf) { optimizing_ = false; continue; }
 
     const size_t new_id = keyframes_.size();
     kf->id = static_cast<int>(new_id);
@@ -269,18 +270,73 @@ void Backend::optimizeThread() {
       // 的关键改进 —— 那个方案里 ikd-Tree 存的是已变换到世界系的点，
       // 回环改了位姿地图也改不了。这里地图由关键帧位姿隐式定义，
       // 位姿一改，重建一次局部地图就全对了。
+      //
+      // 传位姿快照而不是共享的关键帧指针：回调的接收方在前端线程里用这些位姿重建地图，
+      // 而本线程下一次 correctPoses 会改写原对象，共享指针就是数据竞争。
       if (loop_callback_) {
         std::vector<KeyframePtr> recent;
+        M3D anchor_rot;
+        V3D anchor_pos;
         {
           std::lock_guard<std::mutex> lk(kf_mutex_);
           const int total = static_cast<int>(keyframes_.size());
           const int begin = std::max(0, total - cfg_.backend.relocal_kf_num);
-          recent.assign(keyframes_.begin() + begin, keyframes_.end());
+          for (int i = begin; i < total; ++i) {
+            recent.push_back(std::make_shared<Keyframe>(*keyframes_[i]));
+          }
+          anchor_rot = kf->rot;
+          anchor_pos = kf->pos;
         }
-        loop_callback_(recent, kf->rot, kf->pos);
+        loop_callback_(recent, kf->id, anchor_rot, anchor_pos);
       }
     }
+    optimizing_ = false;
   }
+}
+
+bool Backend::flush(double timeout_sec) {
+  if (!running_) return true;   // backend.enable = false 时优化线程根本没启动
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::duration<double>(timeout_sec);
+  while (std::chrono::steady_clock::now() < deadline) {
+    {
+      std::lock_guard<std::mutex> lk(kf_mutex_);
+      if (pending_kfs_.empty() && !optimizing_) return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+void Backend::finalize() {
+  if (running_) return;   // 只在线程都停了之后做，避免与 optimizeThread 并发访问 isam_
+  addLoopFactors();
+  isam_->update(*graph_, *initial_);
+  graph_->resize(0);
+  initial_->clear();
+  for (int i = 0; i < 5; ++i) isam_->update();
+  correctPoses();
+}
+
+void Backend::recordLoopEvent(const LoopConstraint& lc, LoopStage stage,
+                              const std::vector<KeyframePtr>& kfs) {
+  LoopEvent e;
+  e.stage = stage;
+  e.id_from = lc.id_from;
+  e.id_to = lc.id_to;
+  if (lc.id_from >= 0 && lc.id_from < static_cast<int>(kfs.size())) e.t_from = kfs[lc.id_from]->t;
+  if (lc.id_to >= 0 && lc.id_to < static_cast<int>(kfs.size())) e.t_to = kfs[lc.id_to]->t;
+  e.sc_dist = lc.sc_dist;
+  e.icp_fitness = lc.icp_fitness;
+  e.rot_delta = lc.rot_delta;
+  e.pos_delta = lc.pos_delta;
+  std::lock_guard<std::mutex> lk(event_mutex_);
+  loop_events_.push_back(e);
+}
+
+std::vector<LoopEvent> Backend::loopEvents() const {
+  std::lock_guard<std::mutex> lk(event_mutex_);
+  return loop_events_;
 }
 
 // 回环优化后把新位姿写回所有关键帧。
@@ -313,7 +369,14 @@ void Backend::loopThread() {
     }
 
     LoopConstraint lc;
-    if (!loop_detector_->detect(current, snapshot, &lc)) continue;
+    if (!loop_detector_->detect(current, snapshot, &lc)) {
+      if (diag_enabled_ && lc.sc_hit) {
+        recordLoopEvent(lc, lc.verified_lidar ? LoopStage::kRejectedVisual
+                                              : LoopStage::kRejectedIcp, snapshot);
+      }
+      continue;
+    }
+    if (diag_enabled_) recordLoopEvent(lc, LoopStage::kAccepted, snapshot);
 
     std::lock_guard<std::mutex> lk(loop_mutex_);
     pending_loops_.push_back(lc);

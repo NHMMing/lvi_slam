@@ -88,21 +88,33 @@ endif()
 # 实际编译却 include 了 PCL 带进来的 3.3.7。这里把版本显式钉死，
 # 并在配置阶段校验所有依赖用的是同一份 Eigen。
 #
-# 默认值对应 ROS1 Noetic / Ubuntu 20.04 的 apt 版本 —— Noetic 的二进制包
-# （cv_bridge、pcl_conversions）就是用这一套编的，换不了。
-# ROS2 下默认不锁（各发行版不同），需要时用 -DLVI_xxx_VERSION=... 指定；
-# 设为空字符串表示不锁定该库。
+# 默认值按 Ubuntu 版本取对应的 apt 版本 —— ROS 的二进制包（cv_bridge、
+# pcl_conversions）就是用这一套编的，换不了：
+#   20.04 (Noetic)  Eigen 3.3.7 / PCL 1.10 / OpenCV 4.2 / yaml-cpp 0.6.2
+#   22.04 (Humble)  Eigen 3.4.0 / PCL 1.12 / OpenCV 4.5 / yaml-cpp 0.7.0
+# 其他系统（如 24.04、JetPack 自带 OpenCV 的环境）默认不锁。
+# 需要时用 -DLVI_xxx_VERSION=... 指定；设为空字符串表示不锁定该库。
 # ---------------------------------------------------------------------------
-if(LVI_ROS EQUAL 2)
-  set(_lvi_def_eigen "")
-  set(_lvi_def_pcl "")
-  set(_lvi_def_opencv "")
-  set(_lvi_def_yaml "")
-else()
+set(_lvi_os_version "")
+if(EXISTS "/etc/os-release")
+  file(STRINGS "/etc/os-release" _lvi_os_line REGEX "^VERSION_ID=")
+  string(REGEX REPLACE "^VERSION_ID=\"?([0-9.]+)\"?$" "\\1" _lvi_os_version "${_lvi_os_line}")
+endif()
+if(_lvi_os_version STREQUAL "20.04")
   set(_lvi_def_eigen "3.3.7")
   set(_lvi_def_pcl "1.10")
   set(_lvi_def_opencv "4.2")
   set(_lvi_def_yaml "0.6.2")
+elseif(_lvi_os_version STREQUAL "22.04")
+  set(_lvi_def_eigen "3.4.0")
+  set(_lvi_def_pcl "1.12")
+  set(_lvi_def_opencv "4.5")
+  set(_lvi_def_yaml "0.7.0")
+else()
+  set(_lvi_def_eigen "")
+  set(_lvi_def_pcl "")
+  set(_lvi_def_opencv "")
+  set(_lvi_def_yaml "")
 endif()
 set(LVI_EIGEN_VERSION    "${_lvi_def_eigen}"  CACHE STRING "Eigen 精确版本（空 = 不锁定）")
 set(LVI_PCL_VERSION      "${_lvi_def_pcl}"    CACHE STRING "PCL major.minor（空 = 不锁定）")
@@ -288,8 +300,21 @@ target_compile_definitions(lvi_core PUBLIC LVI_EXPECTED_EIGEN_VERSION=${_ev_num}
 # ---------------------------------------------------------------------------
 # 离线运行器：无 ROS，直接跑数据集。评估基础设施优先级高于任何新特性。
 # ---------------------------------------------------------------------------
+add_custom_target(lvi_git_rev
+  COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/generated/lvi_git_rev.h
+          -DBUILD_TYPE=${CMAKE_BUILD_TYPE}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GitRev.cmake
+  BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/lvi_git_rev.h
+  COMMENT "lvi_slam: 生成 git 版本号")
 add_executable(lvi_offline tools/offline_runner.cpp)
+add_dependencies(lvi_offline lvi_git_rev)
+target_include_directories(lvi_offline PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(lvi_offline lvi_core)
+# std::filesystem 在 GCC 8 及更早版本需要单独链接 stdc++fs（Ubuntu 20.04 的 GCC 9 不需要）
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+  target_link_libraries(lvi_offline stdc++fs)
+endif()
 
 # ---------------------------------------------------------------------------
 # 按 ROS 版本接入：节点、bag 读取、安装规则

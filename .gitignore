@@ -6,3 +6,7 @@ log/
 *.a
 compile_commands.json
 .cache/
+devel/
+results/
+__pycache__/
+*.egg-info/

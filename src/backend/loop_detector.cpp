@@ -141,6 +141,8 @@ bool LoopDetector::detect(const KeyframePtr& current,
 
   out->id_from = current->id;
   out->id_to = prev_id;
+  out->sc_hit = true;
+  out->sc_dist = best_dist;
 
   // 把 Scan Context 的移位量转成偏航角，作为 ICP 初值。
   // 没有这个初值，ICP 在大偏航角下基本必然收敛到局部极小。
@@ -210,6 +212,7 @@ bool LoopDetector::verifyByIcp(const KeyframePtr& cur, const KeyframePtr& prev,
 
   if (!icp.hasConverged()) return false;
   const double fitness = icp.getFitnessScore();
+  out->icp_fitness = fitness;
   if (fitness > cfg_.backend.icp_fitness_thresh) return false;
 
   // ICP 给的是「把当前帧点云对齐到历史子图」的修正量。

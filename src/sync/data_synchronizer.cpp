@@ -32,7 +32,7 @@ void DataSynchronizer::pushImu(const ImuData& imu) {
   imu_buf_.push_back(imu);
   // IMU 缓冲上限：正常情况下会被及时消费，堆积说明前端跟不上，
   // 这时丢老数据比 OOM 好。
-  while (imu_buf_.size() > 20000) imu_buf_.pop_front();
+  while (imu_buf_.size() > 20000) { imu_buf_.pop_front(); ++drops_.imu; }
 }
 
 void DataSynchronizer::pushCloud(const CloudPtr& cloud, double header_time) {
@@ -40,7 +40,11 @@ void DataSynchronizer::pushCloud(const CloudPtr& cloud, double header_time) {
   std::lock_guard<std::mutex> lk(mtx_);
   cloud_buf_.push_back(cloud);
   cloud_time_buf_.push_back(header_time);
-  while (cloud_buf_.size() > 50) { cloud_buf_.pop_front(); cloud_time_buf_.pop_front(); }
+  while (cloud_buf_.size() > 50) {
+    cloud_buf_.pop_front();
+    cloud_time_buf_.pop_front();
+    ++drops_.cloud;
+  }
 }
 
 void DataSynchronizer::pushImage(const cv::Mat& img, double timestamp) {
@@ -52,7 +56,7 @@ void DataSynchronizer::pushImage(const cv::Mat& img, double timestamp) {
   if (img.channels() == 3) cv::cvtColor(img, d.gray, cv::COLOR_BGR2GRAY);
   else d.gray = img;
   image_buf_.push_back(std::move(d));
-  while (image_buf_.size() > 30) image_buf_.pop_front();
+  while (image_buf_.size() > 30) { image_buf_.pop_front(); ++drops_.image; }
 }
 
 void DataSynchronizer::reset() {

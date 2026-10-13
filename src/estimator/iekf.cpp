@@ -15,14 +15,17 @@ bool IEKF::update(ObservationModel* model, const State& prior, State* state) {
 
   StateMat G = StateMat::Zero();
   const StateMat I = StateMat::Identity();
+  last_stats_ = UpdateStats();
 
   for (int iter = 0; iter < opt_.max_iterations; ++iter) {
     // ---- 1. 在当前状态下重新做数据关联并构建残差 ----
     ObservationModel::Residuals res;
     if (!model->buildResidual(*state, &res) || res.num_valid == 0) {
       std::cerr << "[iEKF] " << model->name() << ": no valid observation\n";
+      last_stats_.iterations = iter;
       return false;
     }
+    last_stats_.iterations = iter + 1;
 
     // 残差变大说明上一步走过头了，回退并结束。
     // 回退后的状态正是上一轮 G 的线性化点，协方差更新仍然要做——
@@ -34,6 +37,8 @@ bool IEKF::update(ObservationModel* model, const State& prior, State* state) {
     }
     best_state = *state;
     last_error = res.mean_error;
+    last_stats_.num_valid  = res.num_valid;
+    last_stats_.mean_error = res.mean_error;
 
     const int m = static_cast<int>(res.z.rows());
     const int n = static_cast<int>(res.active_cols.size());
@@ -93,6 +98,7 @@ bool IEKF::update(ObservationModel* model, const State& prior, State* state) {
       break;
     }
   }
+  last_stats_.converged = converged;
   return true;
 }
 

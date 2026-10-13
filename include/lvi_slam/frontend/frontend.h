@@ -13,11 +13,13 @@
 
 #include "lvi_slam/common/types.h"
 #include "lvi_slam/common/config.h"
+#include "lvi_slam/common/diagnostics.h"
 #include "lvi_slam/imu/imu_processor.h"
 #include "lvi_slam/map/voxel_map.h"
 #include "lvi_slam/estimator/iekf.h"
 #include "lvi_slam/lio/lio_updater.h"
 #include "lvi_slam/vio/vio_updater.h"
+#include <deque>
 #include <functional>
 
 namespace lvi {
@@ -37,18 +39,30 @@ class Frontend {
   using KeyframeCallback = std::function<void(const KeyframePtr&)>;
   void setKeyframeCallback(KeyframeCallback cb) { kf_callback_ = std::move(cb); }
 
-  // 后端回环优化后调用：
+  // 后端回环优化后调用（必须在前端主循环线程里调用，与 process 串行）：
   //   1. 用修正后的关键帧位姿重建前端局部地图
-  //   2. 把 iEKF 状态重置到修正后的最新位姿
+  //   2. 由关键帧 anchor_kf_id 的「前端位姿 → 优化后位姿」求出修正变换，
+  //      作用到当前 iEKF 状态上
+  // 不能直接把状态设成那个关键帧的优化位姿：后端处理有延迟，
+  // anchor 关键帧可能已经是几帧之前的了，直接覆盖会让状态跳回过去。
   // 这是前后端信息同步的唯一入口。
   void applyLoopCorrection(const std::vector<KeyframePtr>& corrected_kfs,
-                           const M3D& corrected_rot, const V3D& corrected_pos);
+                           int anchor_kf_id,
+                           const M3D& anchor_rot, const V3D& anchor_pos);
+
+  // 关键帧在当前前端坐标系下的位姿（回环修正后会随之更新）。
+  // 只保留最近 kKfPoseHistory 个，查不到返回 false。
+  int  lastKeyframeId() const { return kf_id_counter_ - 1; }
+  bool keyframePose(int id, M3D* rot, V3D* pos) const;
 
   // 高频位姿输出（IMU 频率），供外部控制器使用
   State propagateHighFreq(const ImuData& imu);
 
   // 退化状态查询，用于日志和上层决策
   const IEKF::DegeneracyInfo& degeneracy() const { return degen_; }
+
+  // 最近一次 process 的诊断记录（mode == 0 表示该帧还在初始化，没有更新）
+  const FrameDiag& lastDiag() const { return diag_; }
 
  private:
   bool handleLio(const SyncPackage& pkg);
@@ -88,6 +102,13 @@ class Frontend {
   V3D    last_kf_pos_ = V3D::Zero();
   double last_kf_time_ = -1.0;
   V3D    last_loop_kf_pos_ = V3D::Zero();
+
+  struct KfPose { int id; M3D rot; V3D pos; };
+  static constexpr size_t kKfPoseHistory = 2000;
+  std::deque<KfPose> kf_poses_;
+
+  FrameDiag diag_;
+  void fillDiag(const SyncPackage& pkg, bool ok);
 
   // 外参在线标定的分阶段解锁
   double system_start_time_ = -1.0;
