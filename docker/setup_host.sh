@@ -7,6 +7,12 @@
 #   sudo -E docker/setup_host.sh --arm64        # 另外注册 arm64 模拟器，用于本机交叉构建 Orin 镜像
 #   sudo -E docker/setup_host.sh --no-nvidia    # 跳过 NVIDIA 运行时
 #
+# Docker 软件源（--mirror）：
+#   auto（默认）  依次探测：系统 apt 正在用的镜像站 → tuna → aliyun → ustc，用第一个可达的，
+#                 直连不走代理；都不可达时退回官方源（走代理）
+#   official      官方 download.docker.com（有代理时走代理）
+#   <URL>         指定 docker-ce 镜像根地址，如 https://mirrors.tuna.tsinghua.edu.cn/docker-ce
+#
 # 代理：检测到 http(s)_proxy 时会同时写入 dockerd 的 systemd 配置——
 # dockerd 是系统服务，不继承登录 shell 的环境变量，不配就拉不动镜像。
 #
@@ -17,14 +23,18 @@ set -euo pipefail
 
 WITH_NVIDIA=auto
 WITH_ARM64=0
-for a in "$@"; do
-  case "$a" in
+MIRROR="${DOCKER_MIRROR:-auto}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --no-nvidia) WITH_NVIDIA=0 ;;
     --nvidia)    WITH_NVIDIA=1 ;;
     --arm64)     WITH_ARM64=1 ;;
-    -h|--help)   sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数: $a" >&2; exit 1 ;;
+    --mirror)    MIRROR="${2:?--mirror 需要 auto | official | <URL>}"; shift ;;
+    --mirror=*)  MIRROR="${1#--mirror=}" ;;
+    -h|--help)   sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
+  shift
 done
 
 [[ $EUID -eq 0 ]] || { echo "请用 sudo -E 运行" >&2; exit 1; }
@@ -39,7 +49,7 @@ fi
 
 PROXY="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
 NOPROXY="${no_proxy:-${NO_PROXY:-localhost,127.0.0.1}}"
-[[ -n "$PROXY" ]] && log "使用代理 $PROXY（仅用于境外源与 dockerd）"
+[[ -n "$PROXY" ]] && log "检测到代理 $PROXY（apt 只对境外源使用；同时写入 dockerd）"
 
 # apt 一律直连，只有境外的 Docker / NVIDIA 源按主机名单独走代理。
 # 原因：sudo -E 会把 http(s)_proxy 带给 apt，而 apt 不认 no_proxy 里 *.cn 这类写法，
@@ -72,7 +82,39 @@ apt_install() {
   }
 }
 
-# ---- 1. Docker Engine（官方 apt 源）----
+# ---- 选择 Docker 软件源 ----
+OFFICIAL=https://download.docker.com
+direct_ok() {   # 直连（不走 shell 代理）能拿到 <根>/linux/ubuntu/gpg
+  env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    curl -fsS -m 8 -o /dev/null "$1/linux/ubuntu/gpg" 2>/dev/null
+}
+case "$MIRROR" in
+  official) DOCKER_REPO="$OFFICIAL" ;;
+  auto)
+    DOCKER_REPO=""
+    sys_host=$(grep -rhoE '^deb(\s+\[[^]]*\])?\s+https?://[^/ ]+' /etc/apt/sources.list 2>/dev/null |
+               grep -oE 'https?://[^/ ]+$' | grep -v 'archive.ubuntu.com\|security.ubuntu.com' | head -1 || true)
+    for base in ${sys_host:+"$sys_host/docker-ce"} https://mirrors.tuna.tsinghua.edu.cn/docker-ce \
+                https://mirrors.aliyun.com/docker-ce https://mirrors.ustc.edu.cn/docker-ce; do
+      if direct_ok "$base"; then DOCKER_REPO="$base"; break; fi
+      log "镜像不可用：$base"
+    done
+    if [[ -z "$DOCKER_REPO" ]]; then
+      log "国内镜像都不可达，改用官方源"
+      DOCKER_REPO="$OFFICIAL"
+    fi ;;
+  *) DOCKER_REPO="${MIRROR%/}" ;;
+esac
+# 镜像站直连；只有官方源才按主机名走代理
+if [[ "$DOCKER_REPO" != "$OFFICIAL" ]]; then
+  APT_PROXY_HOSTS=(nvidia.github.io)
+  CURL_DOCKER=(env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY curl)
+else
+  CURL_DOCKER=(curl)
+fi
+log "Docker 软件源：$DOCKER_REPO"
+
+# ---- 1. Docker Engine ----
 . /etc/os-release
 if ! command -v docker >/dev/null || ! docker buildx version >/dev/null 2>&1; then
   log "安装 Docker Engine（$VERSION_CODENAME）"
@@ -82,10 +124,10 @@ if ! command -v docker >/dev/null || ! docker buildx version >/dev/null 2>&1; th
   done
   [[ ${#missing[@]} -eq 0 ]] || apt_install "${missing[@]}"
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  "${CURL_DOCKER[@]}" -fsSL "$DOCKER_REPO/linux/ubuntu/gpg" -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
+$DOCKER_REPO/linux/ubuntu $VERSION_CODENAME stable" \
     > /etc/apt/sources.list.d/docker.list
   apt_update_list docker.list
   apt_install docker-ce docker-ce-cli containerd.io \
