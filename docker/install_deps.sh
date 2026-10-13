@@ -4,6 +4,8 @@
 #   sudo ROS_DISTRO=noetic docker/install_deps.sh     # ROS1（需已配置 ROS apt 源）
 #   sudo ROS_DISTRO=humble docker/install_deps.sh     # ROS2
 #   sudo ROS_DISTRO=none   docker/install_deps.sh     # 无 ROS
+# 可只做一部分：install_deps.sh apt | gtsam | all（默认 all）。Dockerfile 分两层调用，
+# 这样 GTSAM 编译失败不会连带重下 apt 依赖。
 #
 # 版本策略：Eigen / PCL / OpenCV / yaml-cpp / Boost 一律用发行版 apt 版本——
 # ROS 的二进制包（cv_bridge、pcl_conversions）就是用它们编的，换了必出 ABI 问题。
@@ -16,6 +18,8 @@ GTSAM_VERSION="${GTSAM_VERSION:-4.2}"
 GTSAM_PREFIX="${GTSAM_PREFIX:-/opt/gtsam}"
 JOBS="${JOBS:-$(nproc)}"
 export DEBIAN_FRONTEND=noninteractive
+STEP="${1:-all}"
+[[ "$STEP" =~ ^(apt|gtsam|all)$ ]] || { echo "用法: $0 [apt|gtsam|all]" >&2; exit 1; }
 
 log() { echo -e "\033[1;32m[deps]\033[0m $*"; }
 
@@ -79,11 +83,18 @@ case "$ROS_DISTRO" in
   *) echo "不支持的 ROS_DISTRO: $ROS_DISTRO（noetic | humble | none）" >&2; exit 1 ;;
 esac
 
-log "apt 依赖（ROS_DISTRO=$ROS_DISTRO）"
-apt_update
-apt_get install -y --no-install-recommends "${common[@]}" "${ros[@]}"
+if [[ "$STEP" != gtsam ]]; then
+  log "apt 依赖（ROS_DISTRO=$ROS_DISTRO）"
+  apt_update
+  apt_get install -y --no-install-recommends "${common[@]}" "${ros[@]}"
+  # 镜像里清掉 apt 索引减小体积（Dockerfile 设 CLEAN_APT=1）；裸机上保留。
+  # 不用 /.dockerenv 判断：BuildKit 构建期间没有这个文件
+  if [[ "${CLEAN_APT:-0}" == 1 ]]; then rm -rf /var/lib/apt/lists/*; fi
+fi
 
-if [[ -f "$GTSAM_PREFIX/lib/cmake/GTSAM/GTSAMConfig.cmake" ]]; then
+if [[ "$STEP" == apt ]]; then
+  :
+elif [[ -f "$GTSAM_PREFIX/lib/cmake/GTSAM/GTSAMConfig.cmake" ]]; then
   log "GTSAM 已存在于 $GTSAM_PREFIX，跳过"
 else
   log "源码编译 GTSAM $GTSAM_VERSION → $GTSAM_PREFIX"
@@ -111,8 +122,4 @@ else
   echo "$GTSAM_PREFIX/lib" > /etc/ld.so.conf.d/gtsam.conf
   ldconfig
 fi
-
-# 镜像里清掉 apt 索引减小体积（Dockerfile 设 CLEAN_APT=1）；裸机上保留。
-# 不用 /.dockerenv 判断：BuildKit 构建期间没有这个文件
-[[ "${CLEAN_APT:-0}" == 1 ]] && rm -rf /var/lib/apt/lists/*
-log "完成"
+log "完成（$STEP）"

@@ -39,7 +39,13 @@ RUN if [[ -n "$APT_MIRROR" ]]; then \
           /etc/apt/sources.list; \
     fi
 COPY docker/install_deps.sh /tmp/install_deps.sh
-RUN CLEAN_APT=1 /tmp/install_deps.sh && rm /tmp/install_deps.sh
+# apt 与 GTSAM 分两层：任何一步失败，前面完成的层都留在缓存里。
+# 下载的 .deb 放在 BuildKit 缓存挂载里（不进镜像层），构建中途断网/失败后重跑，
+# 已下载的包直接复用、未下完的断点续传。基础镜像自带的 docker-clean 会在安装后删掉 .deb，先去掉。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    CLEAN_APT=1 /tmp/install_deps.sh apt
+RUN /tmp/install_deps.sh gtsam && rm /tmp/install_deps.sh
 COPY docker/entrypoint.sh /usr/local/bin/lvi-entrypoint
 ENTRYPOINT ["/usr/local/bin/lvi-entrypoint"]
 CMD ["bash"]
