@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lvi-eval"
+version = "0.1.0"
+description = "lvi_slam 精度 / 稳定性 / 一致性 / 效率评估工具"
+requires-python = ">=3.8"
+dependencies = ["numpy>=1.17"]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.1"]
+
+[project.scripts]
+lvi_eval = "lvi_eval.cli:main"
+
+[tool.setuptools]
+packages = ["lvi_eval"]
