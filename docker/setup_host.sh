@@ -39,22 +39,44 @@ fi
 
 PROXY="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
 NOPROXY="${no_proxy:-${NO_PROXY:-localhost,127.0.0.1}}"
-[[ -n "$PROXY" ]] && log "使用代理 $PROXY"
+[[ -n "$PROXY" ]] && log "使用代理 $PROXY（仅用于境外源与 dockerd）"
+
+# apt 一律直连，只有境外的 Docker / NVIDIA 源按主机名单独走代理。
+# 原因：sudo -E 会把 http(s)_proxy 带给 apt，而 apt 不认 no_proxy 里 *.cn 这类写法，
+# 国内镜像（bfsu/tuna/aliyun...）经代理访问常被拒（403），整个 apt-get update 就失败了。
+APT_PROXY_HOSTS=(download.docker.com nvidia.github.io)
+apt_get() {
+  local opts=() h
+  if [[ -n "$PROXY" ]]; then
+    for h in "${APT_PROXY_HOSTS[@]}"; do
+      opts+=(-o "Acquire::http::Proxy::$h=$PROXY" -o "Acquire::https::Proxy::$h=$PROXY")
+    done
+  fi
+  env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    apt-get "${opts[@]}" "$@"
+}
+apt_update() {
+  apt_get update || {
+    echo -e "\033[1;31m[setup]\033[0m apt-get update 失败。先单独执行 'sudo apt-get update' 修好上面报错的源" \
+            "（常见：签名密钥过期、镜像地址失效），再重跑本脚本" >&2
+    exit 1
+  }
+}
 
 # ---- 1. Docker Engine（官方 apt 源）----
 . /etc/os-release
 if ! command -v docker >/dev/null || ! docker buildx version >/dev/null 2>&1; then
   log "安装 Docker Engine（$VERSION_CODENAME）"
-  apt-get update
-  apt-get install -y ca-certificates curl gnupg
+  apt_update
+  apt_get install -y ca-certificates curl gnupg
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
 https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
     > /etc/apt/sources.list.d/docker.list
-  apt-get update
-  apt-get install -y docker-ce docker-ce-cli containerd.io \
+  apt_update
+  apt_get install -y docker-ce docker-ce-cli containerd.io \
                      docker-buildx-plugin docker-compose-plugin
 else
   log "Docker 已安装：$(docker --version)"
@@ -83,8 +105,8 @@ if [[ "$WITH_NVIDIA" == 1 ]]; then
   curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list |
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
     > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-  apt-get update
-  apt-get install -y nvidia-container-toolkit
+  apt_update
+  apt_get install -y nvidia-container-toolkit
   nvidia-ctk runtime configure --runtime=docker
 fi
 
