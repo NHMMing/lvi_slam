@@ -118,12 +118,83 @@ LVI_WS=~/other_ws GTSAM_DIR=/path/to/gtsam/lib/cmake/GTSAM scripts/build_ros1.sh
 
 # ---- ROS2 Humble (Ubuntu 22.04) ----
 sudo apt install ros-humble-desktop
-# livox_ros_driver2 需要先装到同一 workspace
-cd ~/ros2_ws && colcon build --packages-select lvi_slam \
+# 回放 bag 用仓库自带的 third_party/livox_ros_driver2（只有消息定义，不需要 Livox-SDK2）；
+# colcon 发现 lvi_slam 后不进入其子目录，所以要显式列出 base-paths
+cd ~/ros2_ws && colcon build \
+  --base-paths src/lvi_slam src/lvi_slam/third_party/livox_ros_driver2 \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
 `-march=native` 默认关闭（`NATIVE_ARCH=OFF`）：apt 的 PCL/OpenCV 按 16 字节对齐编译，开启后 Eigen 对齐不一致会在内存释放时崩溃。只有所有 Eigen 依赖都用 `-march=native` 自编译时才可以 `-DNATIVE_ARCH=ON`。
+
+## Docker（推荐）
+
+宿主机只需要 Docker，其余依赖（含源码编译的 GTSAM）全在镜像里，换机器不用再配环境。
+一个 `docker/Dockerfile` 覆盖三个变体 × 两种架构：
+
+| 变体 | 基础镜像 | 用途 |
+|---|---|---|
+| `noetic` | Ubuntu 20.04 + ROS1 Noetic | 默认；直接读 `.bag` |
+| `humble` | Ubuntu 22.04 + ROS2 Humble | ROS2 节点 / `.db3` `.mcap` |
+| `noros` | Ubuntu 22.04 | 只有核心库 + `lvi_offline` + `lvi_eval` |
+
+架构：`linux/amd64` 与 `linux/arm64`（Jetson Orin）。GitHub Actions（`.github/workflows/docker.yml`）
+在每次 push 时编译全部 6 个组合并跑单元测试，推送到 `ghcr.io/nhmming/lvi_slam:<变体>[-deps]`。
+
+```bash
+# 1. 新机器一次性准备（安装 Docker；有 NVIDIA 显卡时顺带装容器运行时，用于 RViz）
+sudo -E docker/setup_host.sh            # 之后重新登录一次，让 docker 组生效
+#    Jetson：JetPack 自带 Docker，只需 sudo usermod -aG docker $USER
+
+# 2. 获取依赖镜像：优先从 GHCR 拉，拉不到则本地构建（首次 20-40 分钟，主要是编译 GTSAM）
+docker/lvi.sh pull noetic
+docker/lvi.sh image noetic              # 本地构建；国内可加 APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn
+
+# 3. 开发循环：源码挂载进容器，产物在 ~/.cache/lvi_slam/<变体>，不污染仓库
+docker/lvi.sh build noetic              # 增量编译 + 单元测试（--debug / --no-test）
+docker/lvi.sh shell noetic              # 交互式进入
+
+# 4. 跑数据 + 评估。目录映射：~/datasets → /data，<仓库>/results → /results
+docker/lvi.sh run noetic -- lvi_offline --config /lvi_slam/config/livox_avia.yaml \
+    --data /data/mars_lvig/HKisland01.bag --out-dir /results/hk01
+docker/lvi.sh eval noetic run --run /results/hk01 --gt /data/mars_lvig/gt/HKisland01.tum
+
+# Orin 镜像：本机交叉构建（QEMU，慢）或直接在 Orin 上 docker/lvi.sh image
+sudo -E docker/setup_host.sh --arm64
+docker/lvi.sh image noetic --platform linux/arm64 --push
+```
+
+不想用容器的机器（例如 Orin 裸机）可以直接跑同一份依赖脚本：`sudo ROS_DISTRO=noetic docker/install_deps.sh`。
+
+## 评估
+
+自研评估工具 `tools/eval`（`lvi_eval`，只依赖 numpy，画图用 matplotlib），读 `lvi_offline --out-dir` 的输出：
+
+| 文件 | 内容 |
+|---|---|
+| `odometry.tum` | 前端逐帧在线位姿（回环发生时会跳变） |
+| `slam.tum` | 同一组帧，按后端最终优化结果重新表达 |
+| `keyframes.tum` | 后端关键帧最终位姿 |
+| `frames.csv` | 逐帧诊断：耗时、残差、退化、协方差、bias、td |
+| `loops.csv` | 回环候选及每一级验证的结果 |
+| `resources.csv` / `run_meta.json` | 内存/CPU 采样；版本、参数、统计 |
+
+**odometry 与 slam 分开输出，是为了能量化后端和回环到底起了多大作用**：同一次运行里两条轨迹的 ATE /
+漂移之差就是后端收益；`loops.csv` 结合真值给出回环的精度（有没有错误回环）和召回（该闭的环闭上了没有）。
+
+指标分四组：
+
+- **精度**：ATE（默认 4 自由度对齐，可选 SE3/Sim3）、只用开头 20m 对齐的漂移误差、按路程的 RPE（%，°/100m）、按时间的 RPE
+- **稳定性**：输出覆盖率、断流、跳变、发散检测、同一序列重复运行的离散度、成功率
+- **一致性**：NEES（滤波器协方差是否可信）
+- **效率**：单帧耗时分位数、实时倍率、峰值内存、缓冲溢出丢帧
+
+```bash
+lvi_eval run --run results/hk01 --gt gt/HKisland01.tum                 # 单次运行 → report.md + 图
+scripts/eval_batch.sh -c config/livox_avia.yaml -d ~/datasets/mars_lvig \
+    -g ~/datasets/mars_lvig/gt -n 3                                      # 全数据集 × 3 次重复
+lvi_eval compare results/<旧> results/<新> --fail-on-regression          # 改动前后对比
+```
 
 ## 运行
 
@@ -136,7 +207,7 @@ ros2 launch lvi_slam lvi_slam.launch.py     # ROS2
 
 1. `config/livox_mid360.yaml` 里 `visual.enable: false`，先跑纯 LIO
 2. 开机**保持静止约 1 秒**（静止初始化要估重力方向和陀螺 bias）
-3. 用 evo 确认 LIO 精度到位了，再开视觉
+3. 用 `lvi_eval` 确认 LIO 精度到位了，再开视觉
 
 数学框架没立住之前加模块，debug 会变成噩梦。
 
@@ -157,7 +228,9 @@ ros2 launch lvi_slam lvi_slam.launch.py     # ROS2
 | 回环检测（Scan Context + ICP + 视觉双模态） | ✅ |
 | ROS2 节点 + launch + 配置 | ✅ |
 | ROS1 节点 + launch + bag 读取 | ✅（节点与 launch 待实机验证） |
-| 离线数据加载器 | 🚧 骨架（优先级最高） |
+| 离线运行器（ROS1/ROS2 bag、KITTI）+ 诊断输出 | ✅ |
+| 评估工具 `lvi_eval` | ✅ |
+| Docker（noetic/humble/noros × amd64/arm64）+ CI | ✅（待首次在本机/CI 上实际构建） |
 | 外参在线标定解锁逻辑 | 🚧 接口已留 |
 | RViz 配置文件 | 🚧 |
 
@@ -167,7 +240,7 @@ ros2 launch lvi_slam lvi_slam.launch.py     # ROS2
 
 **不要过早并行前端。** 先跑对，profile 出真实瓶颈再说。
 
-**评估基础设施优先于任何新特性。** `tools/offline_runner` 补完之前，你不知道每次改动是变好还是变坏。
+**评估基础设施优先于任何新特性。** 每次改动都用 `scripts/eval_batch.sh -b <上次结果>` 跑一遍，否则你不知道是变好还是变坏。
 
 **时间同步从第一天就做对。** `td` 在线估计不是可选项。
 
