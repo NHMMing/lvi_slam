@@ -1,0 +1,12 @@
+# 构建上下文只需要源码。.git 不进镜像（版本号走构建参数 LVI_GIT_REV）。
+.git
+build/
+install/
+log/
+devel/
+results/
+**/__pycache__/
+*.bag
+*.db3
+*.mcap
+*.pcd

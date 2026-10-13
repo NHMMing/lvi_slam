@@ -1,0 +1,139 @@
+# 构建并发布多架构镜像到 GHCR，同时充当 CI：
+# app 目标会编译全部代码并跑单元测试，任何一个变体编译或测试失败，工作流就失败。
+#
+# 镜像（amd64 + arm64 合并在同一个 tag 下，docker pull 自动选架构）：
+#   ghcr.io/<owner>/lvi_slam:<variant>-deps   依赖环境（开发用，docker/lvi.sh 默认用它）
+#   ghcr.io/<owner>/lvi_slam:<variant>        依赖 + 编译产物（部署 / 直接跑评估）
+#   variant = noetic | humble | noros
+#
+# arm64 用 GitHub 原生 ARM runner（公开仓库免费），不走 QEMU 模拟——
+# 模拟编译 GTSAM 要几个小时。
+name: docker
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [noetic, humble, noros]
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 变量
+        id: v
+        run: |
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "image=${REGISTRY}/${owner}/lvi_slam" >> "$GITHUB_OUTPUT"
+          case '${{ matrix.variant }}' in
+            noetic) echo "distro=noetic" >> "$GITHUB_OUTPUT" ;;
+            humble) echo "distro=humble" >> "$GITHUB_OUTPUT" ;;
+            noros)  echo "distro=none"   >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "push=${{ github.event_name != 'pull_request' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: steps.v.outputs.push == 'true'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 两个目标分别按 digest 推送，最后由 merge 作业合成多架构 tag
+      - name: deps 镜像
+        id: deps
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: deps
+          platforms: linux/${{ matrix.arch }}
+          build-args: ROS_DISTRO=${{ steps.v.outputs.distro }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.v.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ steps.v.outputs.push }}
+
+      - name: app 镜像（编译 + 单元测试）
+        id: app
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: app
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            ROS_DISTRO=${{ steps.v.outputs.distro }}
+            LVI_GIT_REV=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.v.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ steps.v.outputs.push }}
+
+      - name: 记录 digest
+        if: steps.v.outputs.push == 'true'
+        run: |
+          mkdir -p /tmp/digests/deps /tmp/digests/app
+          touch "/tmp/digests/deps/${{ steps.deps.outputs.digest }}"
+          touch "/tmp/digests/app/${{ steps.app.outputs.digest }}"
+          for f in /tmp/digests/*/*; do mv "$f" "$(dirname "$f")/$(basename "$f" | sed 's/^sha256://')"; done
+
+      - uses: actions/upload-artifact@v4
+        if: steps.v.outputs.push == 'true'
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/digests
+          retention-days: 1
+
+  merge:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        variant: [noetic, humble, noros]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.variant }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 合成多架构 tag
+        run: |
+          image=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/lvi_slam
+          v=${{ matrix.variant }}
+          suffix=""
+          [[ "${{ github.ref_type }}" == tag ]] && suffix="-${{ github.ref_name }}"
+          for target in deps app; do
+            tag="$v"; [[ $target == deps ]] && tag="$v-deps"
+            refs=$(for d in /tmp/digests/$target/*; do echo "$image@sha256:$(basename "$d")"; done)
+            docker buildx imagetools create -t "$image:$tag" ${suffix:+-t "$image:$tag$suffix"} $refs
+            docker buildx imagetools inspect "$image:$tag"
+          done
