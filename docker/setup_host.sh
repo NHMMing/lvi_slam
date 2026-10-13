@@ -55,10 +55,19 @@ apt_get() {
   env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
     apt-get "${opts[@]}" "$@"
 }
-apt_update() {
-  apt_get update || {
-    echo -e "\033[1;31m[setup]\033[0m apt-get update 失败。先单独执行 'sudo apt-get update' 修好上面报错的源" \
-            "（常见：签名密钥过期、镜像地址失效），再重跑本脚本" >&2
+# 只刷新本脚本添加的那一个源：系统里其他第三方源（VS Code、Chrome、PPA...）
+# 连不上或密钥过期都与安装 Docker 无关，不能让它们把整个安装卡住。
+apt_update_list() {   # apt_update_list <sources.list.d 下的文件名>
+  apt_get update -o Dir::Etc::sourcelist="sources.list.d/$1" \
+                 -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" || {
+    echo -e "\033[1;31m[setup]\033[0m 刷新 $1 失败，见上面的报错" >&2
+    exit 1
+  }
+}
+apt_install() {
+  apt_get install -y "$@" || {
+    echo -e "\033[1;31m[setup]\033[0m 安装失败。若提示找不到依赖包，先执行 'sudo apt-get update'" \
+            "（报错的第三方源可以忽略）后重跑本脚本" >&2
     exit 1
   }
 }
@@ -67,16 +76,19 @@ apt_update() {
 . /etc/os-release
 if ! command -v docker >/dev/null || ! docker buildx version >/dev/null 2>&1; then
   log "安装 Docker Engine（$VERSION_CODENAME）"
-  apt_update
-  apt_get install -y ca-certificates curl gnupg
+  missing=()
+  for p in ca-certificates curl gnupg; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "ok installed" || missing+=("$p")
+  done
+  [[ ${#missing[@]} -eq 0 ]] || apt_install "${missing[@]}"
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
 https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
     > /etc/apt/sources.list.d/docker.list
-  apt_update
-  apt_get install -y docker-ce docker-ce-cli containerd.io \
+  apt_update_list docker.list
+  apt_install docker-ce docker-ce-cli containerd.io \
                      docker-buildx-plugin docker-compose-plugin
 else
   log "Docker 已安装：$(docker --version)"
@@ -105,8 +117,8 @@ if [[ "$WITH_NVIDIA" == 1 ]]; then
   curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list |
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
     > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-  apt_update
-  apt_get install -y nvidia-container-toolkit
+  apt_update_list nvidia-container-toolkit.list
+  apt_install nvidia-container-toolkit
   nvidia-ctk runtime configure --runtime=docker
 fi
 
