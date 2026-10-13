@@ -23,7 +23,8 @@ FROM ubuntu:22.04 AS base-none
 # ---------------------------------------------------------------------------
 FROM base-${ROS_DISTRO} AS deps
 ARG ROS_DISTRO
-# 可选 apt 镜像，例如 http://mirrors.tuna.tsinghua.edu.cn（只替换 Ubuntu 源，不动 ROS 源）
+# 可选 apt 镜像站根地址，例如 http://mirrors.tuna.tsinghua.edu.cn。只替换 Ubuntu 源，
+# 且 apt 直连镜像站；ROS 源保持官方（各镜像站的 ROS 路径不统一），单独走代理。
 ARG APT_MIRROR=""
 # 并行编译数（空 = nproc）。ARG 在 RUN 里就是环境变量，install_deps.sh / ws_build.sh 直接读取
 ARG JOBS=""

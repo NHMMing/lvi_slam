@@ -27,7 +27,9 @@
 # 其他环境变量
 #   LVI_REGISTRY  镜像仓库前缀，默认 ghcr.io/nhmming
 #   LVI_IMAGE     直接指定镜像（覆盖变体推导）
-#   APT_MIRROR    构建时替换 Ubuntu apt 源，如 http://mirrors.tuna.tsinghua.edu.cn
+#   APT_MIRROR    构建时把镜像里的 Ubuntu 与 ROS apt 源换成国内镜像站（直连不走代理），
+#                 如 http://mirrors.tuna.tsinghua.edu.cn。注意：值变了会让 deps 层缓存失效、
+#                 GTSAM 重新编译，所以选定后固定下来（例如写进 ~/.zshrc）
 #   LVI_JOBS      镜像构建的并行编译数，默认 min(nproc, 可用内存GB/2)——GTSAM 每个编译进程
 #                 峰值约 1.5-2GB，按核数开满在 16 核 / 16GB 的机器上会 OOM
 set -euo pipefail

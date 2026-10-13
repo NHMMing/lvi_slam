@@ -19,6 +19,32 @@ export DEBIAN_FRONTEND=noninteractive
 
 log() { echo -e "\033[1;32m[deps]\033[0m $*"; }
 
+# apt 选项：
+# - 网络不稳时单个文件失败（代理 502 等）就会让整个构建失败 → 自动重试
+# - 用了国内镜像（APT_MIRROR，Dockerfile 已替换 Ubuntu 源）时 apt 直连：国内镜像经代理访问
+#   常被拒（403），而 apt 不认 no_proxy 里 *.cn 这类写法。ROS 官方源按主机名单独走代理。
+#   代理变量本身保留给后面的 git clone（GitHub）
+apt_get() {
+  local opts=(-o Acquire::Retries=5)
+  local proxy="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+  if [[ -n "${APT_MIRROR:-}" ]]; then
+    [[ -n "$proxy" ]] && opts+=(-o "Acquire::http::Proxy::packages.ros.org=$proxy")
+    env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+      apt-get "${opts[@]}" "$@"
+  else
+    apt-get "${opts[@]}" "$@"
+  fi
+}
+apt_update() {   # apt-get update 对索引失败只报错不重试，整轮重来
+  local i
+  for i in 1 2 3; do
+    apt_get update && return 0
+    log "apt-get update 失败（第 $i 次），10 秒后重试"
+    sleep 10
+  done
+  return 1
+}
+
 common=(
   build-essential cmake git pkg-config ca-certificates curl
   libeigen3-dev libpcl-dev libopencv-dev libyaml-cpp-dev
@@ -54,15 +80,19 @@ case "$ROS_DISTRO" in
 esac
 
 log "apt 依赖（ROS_DISTRO=$ROS_DISTRO）"
-apt-get update
-apt-get install -y --no-install-recommends "${common[@]}" "${ros[@]}"
+apt_update
+apt_get install -y --no-install-recommends "${common[@]}" "${ros[@]}"
 
 if [[ -f "$GTSAM_PREFIX/lib/cmake/GTSAM/GTSAMConfig.cmake" ]]; then
   log "GTSAM 已存在于 $GTSAM_PREFIX，跳过"
 else
   log "源码编译 GTSAM $GTSAM_VERSION → $GTSAM_PREFIX"
   src=$(mktemp -d)
-  git clone --depth 1 --branch "$GTSAM_VERSION" https://github.com/borglab/gtsam.git "$src"
+  for i in 1 2 3; do
+    git clone --depth 1 --branch "$GTSAM_VERSION" https://github.com/borglab/gtsam.git "$src" && break
+    [[ $i == 3 ]] && { echo "GTSAM 下载失败" >&2; exit 1; }
+    log "git clone 失败（第 $i 次），10 秒后重试"; rm -rf "$src"; mkdir -p "$src"; sleep 10
+  done
   cmake -S "$src" -B "$src/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$GTSAM_PREFIX" \
